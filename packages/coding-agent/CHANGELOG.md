@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 - Fixed resident daemon workers retaining their launch environment across supervisor restarts while keeping client-owned credentials out of descriptor files.
-- Fixed ACP rejecting an immediate follow-up prompt with "Agent is already processing" when injected work (subagent replies, heartbeats) restarted the session after the previous turn; the follow-up now queues behind the in-flight work instead of failing.
+- Fixed ACP rejecting an immediate follow-up prompt with "Agent is already processing" when injected work (subagent replies, heartbeats) restarted the session after the previous turn; the follow-up now queues behind the in-flight work instead of failing, and `session/cancel` drops a queued follow-up that has not started.
 
 ## [0.7.0] - 2026-08-05
 
