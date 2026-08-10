@@ -264,6 +264,15 @@ export {
 	truncateTail,
 	withFileMutationQueue,
 } from "./core/tools/index.js";
+export { DiscordBridge, type DiscordBridgeOptions } from "./gateway/discord/bridge.js";
+export {
+	type DiscordBotMessageMode,
+	type DiscordBridgeConfig,
+	loadDiscordConfig,
+	redactDiscordConfig,
+} from "./gateway/discord/config.js";
+export { routeMessage, stripBotMention } from "./gateway/discord/routing.js";
+export { createDiscordSessionKey } from "./gateway/discord/session-key.js";
 // Main entry point
 export { type MainOptions, main } from "./main.js";
 export {

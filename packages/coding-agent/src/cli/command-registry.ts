@@ -150,6 +150,20 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		usage: "config",
 		summary: "Configure package resources",
 	},
+	{
+		path: ["gateway"],
+		usage: "gateway <discord>",
+		summary: "Run a messaging gateway",
+	},
+	{
+		path: ["gateway", "discord"],
+		usage: "gateway discord [--cwd <dir>] [--daemon-socket <path>]",
+		summary: "Connect Prime Agent to Discord",
+		options: [
+			"--cwd <dir>            Set the agent working directory",
+			"--daemon-socket <path> Use a specific Prime Agent daemon socket",
+		],
+	},
 ];
 
 export const PUBLIC_COMMAND_NAMES = new Set(

@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { runDiscordGatewayCommand } from "../gateway/discord/command.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -140,9 +141,24 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "config":
 			if (!requireArgumentCount(args.slice(1), 0, "config")) return HANDLED;
 			return continueWith(args);
+		case "gateway":
+			return runGateway(args.slice(1));
 		default:
 			return continueWith(args);
 	}
+}
+
+async function runGateway(args: string[]): Promise<PublicCommandResult> {
+	const subcommand = args[0];
+	if (subcommand !== "discord") {
+		const suggestion = subcommand ? findCommandSuggestion(subcommand, ["discord"]) : undefined;
+		return fail(
+			subcommand ? `Unknown gateway: ${subcommand}` : "Missing gateway.",
+			suggestion ? `Did you mean "${APP_NAME} gateway ${suggestion}"?` : `Run "${APP_NAME} help gateway" for usage.`,
+		);
+	}
+	await runDiscordGatewayCommand(args.slice(1));
+	return HANDLED;
 }
 
 function normalizeLeadingDaemonSocketOption(args: string[]): string[] {

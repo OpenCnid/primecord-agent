@@ -9,7 +9,7 @@
 </p>
 
 <h3 align="center">
-Prime Agent: A Self-Improving RLM Agent
+PrimeCord Agent: Prime Agent with a Discord Gateway
 </h3>
 
 <p align="center">
@@ -20,13 +20,34 @@ Prime Agent: A Self-Improving RLM Agent
 </p>
 
 <p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  <a href="https://github.com/OpenCnid/primecord-agent/actions/workflows/ci.yml">
+    <img src="https://github.com/OpenCnid/primecord-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
+  <a href="https://github.com/OpenCnid/primecord-agent/actions/workflows/build-binaries.yml">
+    <img src="https://github.com/OpenCnid/primecord-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
   </a>
 </p>
+
+## PrimeCord: the Discord-enabled fork
+
+PrimeCord Agent extends [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) with a secure, persistent Discord gateway. It brings the full Prime Agent harness into Discord while retaining daemon-backed sessions, tools, subagents, and continual harness state.
+
+- **Discord-native conversations:** authorized DMs, mention-based server routing, free-response channels, and automatic threads.
+- **Durable isolated sessions:** per-user conversation histories reconnect to resident Prime Agent workers after gateway restarts.
+- **Live agent output:** streamed replies, tool-progress updates, reactions, safe 2,000-character splitting, and Markdown fence handling.
+- **Images and files:** bounded Discord CDN downloads, actual MIME detection, image input, controlled file caching, and cleanup.
+- **Operational controls:** `/new`, `/abort`, `/status`, `/compact`, `/effort`, `/model`, and `/help` slash commands.
+- **Secure defaults:** fail-closed user, role, and channel allowlists; mention suppression; bot-loop prevention; and graceful shutdown.
+
+Start the gateway after configuring a Discord application and an access policy:
+
+```bash
+export PRIME_DISCORD_BOT_TOKEN='your-bot-token'
+export PRIME_DISCORD_ALLOWED_USERS='123456789012345678'
+prime-agent gateway discord --cwd /path/to/project
+```
+
+See the [Discord gateway guide](packages/coding-agent/docs/discord.md) for bot permissions, environment variables, session behavior, attachments, and security guidance.
 
 Prime Agent is an open-source coding and research agent for general and long-running work. It is designed around two core abstractions:
 
@@ -92,6 +113,7 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
 - [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
 - [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
+- [Discord gateway](packages/coding-agent/docs/discord.md) — bot setup, access controls, persistent sessions, files, and slash commands
 - [RLM programming model](packages/coding-agent/docs/rlm.md) — persistent IPython, subagents, skills, and the trust model
 - [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
 - [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities

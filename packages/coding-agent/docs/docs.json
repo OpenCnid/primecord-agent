@@ -44,6 +44,10 @@
           "path": "sessions.md"
         },
         {
+          "title": "Discord Gateway",
+          "path": "discord.md"
+        },
+        {
           "title": "Compaction",
           "path": "compaction.md"
         }
