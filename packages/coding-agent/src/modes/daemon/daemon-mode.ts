@@ -98,6 +98,12 @@ import {
 	resolveHeartbeatStreamingBehavior,
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
+import {
+	type DiscordGatewayReadRequest,
+	type DiscordGatewayReadResponse,
+	discordGatewayReadFailure,
+	isDiscordGatewayReadResponse,
+} from "../../core/discord-gateway-read.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
@@ -1216,6 +1222,7 @@ export class AgentDaemon {
 			clients: new Set(),
 			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
+			discordGatewayReadRequests: new Map(),
 			eventGeneration: createActiveSessionId(),
 			lastEventSequence: 0,
 			clientEnv,
@@ -1517,6 +1524,7 @@ export class AgentDaemon {
 						},
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
+						discordGatewayReadController: this.createDiscordGatewayReadController(() => stateRef),
 					},
 				}),
 			);
@@ -3806,6 +3814,7 @@ export class AgentDaemon {
 				const extensionUiTarget = command.extensionUiTarget;
 				const extensionUiOwner = {
 					client,
+					supportsDiscordGatewayRead: daemonClientSupportsDiscordGatewayRead(client, state.activeSessionId),
 					supportsExtensionUi:
 						extensionUiTarget === undefined
 							? daemonClientSupportsExtensionUi(client, state.activeSessionId)
@@ -4540,6 +4549,23 @@ export class AgentDaemon {
 				state.extensionUiRequests.delete(command.requestId);
 				pending.resolve(command.response);
 				return success(command.id, "extension_ui_response");
+			}
+
+			case "discord_gateway_read_response": {
+				const state = this.getSessionState(command.activeSessionId);
+				const pending = state.discordGatewayReadRequests?.get(command.requestId);
+				if (!pending) {
+					throw new Error(`Unknown Discord gateway read request: ${command.requestId}`);
+				}
+				if (pending.ownerClientId !== client.id) {
+					throw new Error("Discord gateway read response belongs to another client");
+				}
+				if (!isDiscordGatewayReadResponse(command.response)) {
+					throw new Error("Discord gateway read response is invalid");
+				}
+				state.discordGatewayReadRequests?.delete(command.requestId);
+				pending.resolve(command.response);
+				return success(command.id, "discord_gateway_read_response");
 			}
 
 			case "prepare_update_restart":
@@ -6070,6 +6096,7 @@ export class AgentDaemon {
 			}
 		}
 		cancelPendingExtensionUiRequests(state);
+		cancelPendingDiscordGatewayReadRequests(state);
 		if (reason === "killed" || reason === "shutdown" || reason === "replaced" || reason === "update") {
 			await this.abortBashForClose(state);
 		}
@@ -6135,6 +6162,69 @@ export class AgentDaemon {
 			}
 		}
 		return cascadeError;
+	}
+
+	private createDiscordGatewayReadController(getState: () => ActiveSessionState | undefined): {
+		request(input: DiscordGatewayReadRequest, signal?: AbortSignal): Promise<DiscordGatewayReadResponse>;
+	} {
+		return {
+			request: (input, signal) => {
+				const state = getState();
+				if (!state) {
+					return Promise.resolve(
+						discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read is unavailable for this session."),
+					);
+				}
+				return this.requestDiscordGatewayRead(state, input, signal);
+			},
+		};
+	}
+
+	private requestDiscordGatewayRead(
+		state: ActiveSessionState,
+		request: DiscordGatewayReadRequest,
+		signal?: AbortSignal,
+	): Promise<DiscordGatewayReadResponse> {
+		if (signal?.aborted) {
+			return Promise.resolve(discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read was cancelled."));
+		}
+		const owner = currentDaemonExtensionUiExecutionOwner();
+		if (
+			!owner ||
+			!owner.supportsDiscordGatewayRead ||
+			!state.clients.has(owner.client) ||
+			!daemonClientSupportsDiscordGatewayRead(owner.client, state.activeSessionId)
+		) {
+			return Promise.resolve(
+				discordGatewayReadFailure(
+					"UNAVAILABLE",
+					"Discord gateway read is unavailable outside an active Discord request.",
+				),
+			);
+		}
+		const id = randomUUID();
+		return new Promise((resolve) => {
+			const finish = (response: DiscordGatewayReadResponse) => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve(response);
+			};
+			const onAbort = () => {
+				if (state.discordGatewayReadRequests?.delete(id)) {
+					finish(discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read was cancelled."));
+				}
+			};
+			if (!state.discordGatewayReadRequests) {
+				state.discordGatewayReadRequests = new Map();
+			}
+			state.discordGatewayReadRequests.set(id, { ownerClientId: owner.client.id, resolve: finish });
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.write(owner.client, {
+				type: "discord_gateway_read_request",
+				activeSessionId: state.activeSessionId,
+				id,
+				request,
+			});
+		});
 	}
 
 	private sendExtensionUiToExecutionOwner(state: ActiveSessionState, message: DaemonOutbound): void {
@@ -6685,6 +6775,7 @@ export function detachClientFromActiveSession(client: DaemonSocketClient, state:
 	if (state.clients.size === 0) {
 		cancelPendingExtensionUiRequests(state);
 	}
+	cancelPendingDiscordGatewayReadRequests(state, client.id);
 }
 
 export function setDaemonClientSessionCapabilities(
@@ -6715,6 +6806,10 @@ function daemonClientCapabilitiesForSession(
 
 function daemonClientSupportsExtensionUi(client: DaemonSocketClient, activeSessionId: string): boolean {
 	return client.capabilitiesByActiveSessionId?.get(activeSessionId)?.has("extension_ui") ?? client.supportsExtensionUi;
+}
+
+function daemonClientSupportsDiscordGatewayRead(client: DaemonSocketClient, activeSessionId: string): boolean {
+	return daemonClientCapabilitiesForSession(client, activeSessionId).has("discord_gateway_read");
 }
 
 export function markClientSnapshotStreaming(client: DaemonSocketClient, activeSessionId: string): AbortSignal {
@@ -6765,6 +6860,14 @@ export function cancelPendingExtensionUiRequests(state: ActiveSessionState): voi
 	state.extensionUiRequests.clear();
 	for (const pending of pendingRequests) {
 		pending.resolve({ cancelled: true });
+	}
+}
+
+export function cancelPendingDiscordGatewayReadRequests(state: ActiveSessionState, ownerClientId?: string): void {
+	for (const [id, pending] of state.discordGatewayReadRequests ?? []) {
+		if (ownerClientId && pending.ownerClientId !== ownerClientId) continue;
+		state.discordGatewayReadRequests?.delete(id);
+		pending.resolve(discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read was cancelled."));
 	}
 }
 

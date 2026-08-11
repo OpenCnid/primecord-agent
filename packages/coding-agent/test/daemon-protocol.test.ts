@@ -68,6 +68,21 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability-gates Discord gateway read request and response routing", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
+		expect(DAEMON_COMMAND_COMPATIBILITY.discord_gateway_read_response).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 16,
+			capability: "discord_gateway_read",
+		});
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.discord_gateway_read_request).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 16,
+			capability: "discord_gateway_read",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("discord_gateway_read");
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

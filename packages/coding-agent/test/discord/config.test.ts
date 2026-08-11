@@ -32,6 +32,10 @@ describe("loadDiscordConfig", () => {
 			groupSessionsPerUser: true,
 			historyBackfill: true,
 			historyBackfillLimit: 50,
+			readMaxMessages: 50,
+			readMaxContentChars: 4_000,
+			readMaxTotalContentChars: 12_000,
+			readMaxAttachments: 10,
 			maxAttachmentBytes: 33_554_432,
 			maxAttachments: 5,
 			maxOutboundAttachmentBytes: 26_214_400,
@@ -66,6 +70,10 @@ describe("loadDiscordConfig", () => {
 			PRIME_DISCORD_GROUP_SESSIONS_PER_USER: "false",
 			PRIME_DISCORD_HISTORY_BACKFILL: "false",
 			PRIME_DISCORD_HISTORY_BACKFILL_LIMIT: "75",
+			PRIME_DISCORD_READ_MAX_MESSAGES: "20",
+			PRIME_DISCORD_READ_MAX_CONTENT_CHARS: "1234",
+			PRIME_DISCORD_READ_MAX_TOTAL_CONTENT_CHARS: "4321",
+			PRIME_DISCORD_READ_MAX_ATTACHMENTS: "3",
 			PRIME_DISCORD_MAX_ATTACHMENT_BYTES: "0",
 			PRIME_DISCORD_MAX_ATTACHMENTS: "7",
 			PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENT_BYTES: "0",
@@ -98,6 +106,10 @@ describe("loadDiscordConfig", () => {
 			groupSessionsPerUser: false,
 			historyBackfill: false,
 			historyBackfillLimit: 75,
+			readMaxMessages: 20,
+			readMaxContentChars: 1_234,
+			readMaxTotalContentChars: 4_321,
+			readMaxAttachments: 3,
 			maxAttachmentBytes: 0,
 			maxAttachments: 7,
 			maxOutboundAttachmentBytes: 0,
@@ -123,6 +135,12 @@ describe("loadDiscordConfig", () => {
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_MAX_ATTACHMENT_BYTES: "1.5" })).toThrow(
 			"PRIME_DISCORD_MAX_ATTACHMENT_BYTES must be a non-negative integer",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_READ_MAX_MESSAGES: "0" })).toThrow(
+			"PRIME_DISCORD_READ_MAX_MESSAGES must be a positive integer",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_READ_MAX_CONTENT_CHARS: "10001" })).toThrow(
+			"PRIME_DISCORD_READ_MAX_CONTENT_CHARS must not exceed 10000",
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS: "0" })).toThrow(
 			"PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS must be a positive integer",

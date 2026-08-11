@@ -12,6 +12,7 @@ import type {
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
+import type { DiscordGatewayReadRequest, DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
 import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { GoalState } from "../../core/goals.js";
@@ -527,6 +528,11 @@ export interface AgentConnectionExtensionUiRequest {
 	payload: Record<string, unknown>;
 }
 
+export interface AgentConnectionDiscordGatewayReadRequest {
+	id: string;
+	request: DiscordGatewayReadRequest;
+}
+
 export type AgentConnectionRlmChildAgentStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
 export interface AgentConnectionRlmChildAgentActivity {
@@ -614,6 +620,7 @@ export type AgentConnectionEvent =
 	| { type: "session_resynced"; snapshot: AgentConnectionSnapshot }
 	| { type: "session_status"; recap?: string }
 	| { type: "extension_ui_request"; request: AgentConnectionExtensionUiRequest }
+	| { type: "discord_gateway_read_request"; request: AgentConnectionDiscordGatewayReadRequest }
 	| { type: "extension_error"; extensionPath: string; event: string; error: string }
 	| { type: "connection_status"; status: "reconnecting" | "connected"; error?: string }
 	| { type: "heartbeats_changed" }
@@ -673,6 +680,7 @@ export interface AgentConnection {
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
+	respondToDiscordGatewayReadRequest?(requestId: string, response: DiscordGatewayReadResponse): Promise<void>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
