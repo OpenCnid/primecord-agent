@@ -508,6 +508,7 @@ export class DiscordBridge {
 				message.author.id,
 				message.guildId,
 				targetChannel,
+				targetChannel.id === message.channelId ? message.id : undefined,
 			);
 			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, () =>
 				this.withDiscordReadScope(connection, readScope, () =>
@@ -1232,12 +1233,13 @@ export class DiscordBridge {
 			kind: "guild",
 			guildId: channel.guildId,
 			canUserCreateThread: (userId) => this.canDiscordUserCreateThread(channel, userId),
-			createThread: async (title) => {
+			createThread: async (title, startMessageId) => {
 				try {
 					const thread = await channel.threads.create({
 						name: title,
 						autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
 						reason: "Prime Agent thread requested by the initiating Discord user",
+						...(startMessageId ? { startMessage: startMessageId } : {}),
 					});
 					return { id: thread.id };
 				} catch (error) {
@@ -1357,6 +1359,7 @@ function createDiscordThreadCreationScope(
 	userId: string,
 	guildId: string | null,
 	channel: SendableChannels,
+	messageId?: string,
 ): DiscordThreadCreationScope {
 	if (!guildId) {
 		return { userId, kind: "dm", channelId: channel.id };
@@ -1366,6 +1369,7 @@ function createDiscordThreadCreationScope(
 		kind: channel.isThread() ? "thread" : "guild",
 		guildId,
 		channelId: channel.id,
+		...(messageId ? { messageId } : {}),
 	};
 }
 
