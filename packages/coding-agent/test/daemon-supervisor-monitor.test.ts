@@ -1863,6 +1863,46 @@ describe("daemon worker supervisor monitoring", () => {
 		});
 	});
 
+	it("subscribes with only the Discord capabilities attached to that active session", async () => {
+		type SubscriptionWorker = {
+			client: { requestWorker: (command: unknown) => Promise<{ success: boolean }> };
+		};
+		const activeSessionId = "active-1";
+		const requestWorker = vi.fn(async () => ({ success: true }));
+		const worker: SubscriptionWorker = { client: { requestWorker } };
+		const clientFor = (id: string, attachedActiveSessionId: string, capabilities: string[]): DaemonSocketClient =>
+			({
+				id,
+				attachedActiveSessionIds: new Set([attachedActiveSessionId]),
+				capabilities: new Set(capabilities),
+			}) as unknown as DaemonSocketClient;
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			clients: new Set([
+				clientFor("read", activeSessionId, ["discord_gateway_read"]),
+				clientFor("thread", activeSessionId, ["discord_gateway_thread_creation"]),
+				clientFor("other", "active-2", ["extension_ui", "discord_gateway_read"]),
+			]),
+		}) as {
+			subscribeWorker(worker: SubscriptionWorker, sessionId: string): Promise<void>;
+		};
+
+		await supervisor.subscribeWorker(worker, activeSessionId);
+
+		expect(requestWorker).toHaveBeenCalledWith({
+			type: "worker_subscribe",
+			activeSessionId,
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"slim_attach",
+				"chunked_snapshot",
+				"discord_gateway_read",
+				"discord_gateway_thread_creation",
+			],
+			supportsExtensionUi: false,
+		});
+	});
+
 	it("does not retain an attachment when snapshot loading fails", async () => {
 		type AttachClient = {
 			id: string;

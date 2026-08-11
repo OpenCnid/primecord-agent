@@ -3830,10 +3830,7 @@ export class AgentDaemon {
 						client,
 						state.activeSessionId,
 					),
-					supportsExtensionUi:
-						extensionUiTarget === undefined
-							? daemonClientSupportsExtensionUi(client, state.activeSessionId)
-							: extensionUiTarget !== null,
+					supportsExtensionUi: daemonClientSupportsExtensionUi(client, state.activeSessionId),
 					...(typeof extensionUiTarget === "string" ? { targetClientId: extensionUiTarget } : {}),
 				};
 				if (command.type === "prompt_and_wait") {
@@ -6275,6 +6272,7 @@ export class AgentDaemon {
 				activeSessionId: state.activeSessionId,
 				id,
 				request,
+				...(owner.targetClientId ? { targetClientId: owner.targetClientId } : {}),
 			});
 		});
 	}
@@ -6346,6 +6344,7 @@ export class AgentDaemon {
 				activeSessionId: state.activeSessionId,
 				id,
 				request,
+				...(owner.targetClientId ? { targetClientId: owner.targetClientId } : {}),
 			});
 		});
 	}

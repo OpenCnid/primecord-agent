@@ -64,8 +64,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 16 adds capability-gated, client-hosted Discord gateway read requests.
 // Revision 17 adds capability-gated, client-hosted Discord thread-creation requests.
-export const DAEMON_SCHEMA_REVISION = 17;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-c8ee0559bf34";
+export const DAEMON_SCHEMA_REVISION = 18;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-18-c55101007620";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -981,6 +981,8 @@ export type DaemonOutbound =
 			activeSessionId: string;
 			id: string;
 			request: DiscordGatewayReadRequest;
+			/** Opaque supervisor routing token, removed before delivery to public clients. */
+			targetClientId?: string;
 			meta?: DaemonEventMeta;
 	  }
 	| {
@@ -988,6 +990,8 @@ export type DaemonOutbound =
 			activeSessionId: string;
 			id: string;
 			request: DiscordGatewayThreadCreationRequest;
+			/** Opaque supervisor routing token, removed before delivery to public clients. */
+			targetClientId?: string;
 			meta?: DaemonEventMeta;
 	  };
 
