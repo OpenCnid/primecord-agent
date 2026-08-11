@@ -502,7 +502,7 @@ describe("daemon supervisor resident workers", () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
-		const extensionsDir = join(projectDir, ".prime", "extensions");
+		const extensionsDir = join(projectDir, ".prime", "agent", "extensions");
 		const socketPath = join(
 			tmpdir(),
 			`prime-supervisor-extension-ui-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
@@ -535,10 +535,22 @@ describe("daemon supervisor resident workers", () => {
 		if (!summary.workerPid || !summary.activeSessionId) throw new Error("Worker did not expose its process identity");
 		workerPids.add(summary.workerPid);
 		const secondClient = await connectEventually(socketPath, supervisor);
+		const secondCreated = await secondClient.request({
+			type: "create",
+			noSession: true,
+			launchEnv: { TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json") },
+			config: { cwd: projectDir, agentDir, noTools: true },
+		});
+		if (!secondCreated.success) throw new Error(secondCreated.error);
+		const secondSummary = requireSummary(secondCreated.data);
+		if (!secondSummary.workerPid || !secondSummary.activeSessionId) {
+			throw new Error("Second worker did not expose its process identity");
+		}
+		workerPids.add(secondSummary.workerPid);
 		const firstConnection = await DaemonAgentConnection.attach(firstClient, summary.activeSessionId, {
 			supportsExtensionUi: true,
 		});
-		const secondConnection = await DaemonAgentConnection.attach(secondClient, summary.activeSessionId, {
+		const secondConnection = await DaemonAgentConnection.attach(secondClient, secondSummary.activeSessionId, {
 			supportsExtensionUi: true,
 		});
 		const firstRequests: Array<{ id: string }> = [];
@@ -564,8 +576,14 @@ describe("daemon supervisor resident workers", () => {
 
 		await firstConnection.dispose();
 		await secondConnection.dispose();
+		await firstClient.request({ type: "shutdown" });
 		firstClient.close();
 		secondClient.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(summary.workerPid);
+		await waitForProcessGone(secondSummary.workerPid);
+		workerPids.delete(summary.workerPid);
+		workerPids.delete(secondSummary.workerPid);
 	}, 60_000);
 
 	it("releases an adopted client-owned worker when disposal races supervisor replacement", async () => {
