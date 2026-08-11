@@ -4,6 +4,7 @@ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
 import type { DiscordGatewayThreadCreationResponse } from "../../core/discord-gateway-thread.js";
 import type { AgentStatus } from "../../core/session-manager.js";
+import type { DaemonExtensionUiExecutionOwner } from "./daemon-extension-ui-owner.js";
 import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
 
@@ -42,6 +43,8 @@ export interface ActiveSessionState {
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	discordGatewayReadRequests?: Map<string, ActiveSessionDiscordGatewayReadRequest>;
 	discordGatewayThreadCreationRequests?: Map<string, ActiveSessionDiscordGatewayThreadCreationRequest>;
+	/** The capability owner for the in-flight gateway prompt, retained when async context is not propagated to tools. */
+	discordGatewayExecutionOwner?: DaemonExtensionUiExecutionOwner;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
 	unsubscribe?: () => void;

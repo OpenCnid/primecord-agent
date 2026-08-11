@@ -4113,6 +4113,46 @@ describe("daemon mode helpers", () => {
 		expect(observerWrite).not.toHaveBeenCalled();
 	});
 
+	it("routes a Discord thread request through its active turn owner when async context is unavailable", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const state = makeState("active");
+		const owner = makeClient("gateway", state.activeSessionId);
+		const write = vi.fn<(data: string) => boolean>(() => true);
+		owner.socket = { destroyed: false, write } as unknown as Socket;
+		state.clients.add(owner);
+		setDaemonClientSessionCapabilities(owner, state.activeSessionId, new Set(["discord_gateway_thread_creation"]));
+		state.discordGatewayExecutionOwner = {
+			client: owner,
+			supportsExtensionUi: false,
+			supportsDiscordGatewayThreadCreation: true,
+		};
+		const internals = daemon as unknown as {
+			requestDiscordGatewayThreadCreation(
+				state: ActiveSessionState,
+				request: { title: string },
+			): Promise<{ ok: boolean }>;
+		};
+
+		const pending = internals.requestDiscordGatewayThreadCreation(state, { title: "Planning" });
+		const [requestId, request] = [...(state.discordGatewayThreadCreationRequests ?? new Map())][0] ?? [];
+		expect(requestId).toEqual(expect.any(String));
+		expect(request?.ownerClientId).toBe(owner.id);
+		expect(JSON.parse(write.mock.calls[0]![0])).toMatchObject({
+			type: "discord_gateway_thread_creation_request",
+			activeSessionId: state.activeSessionId,
+			id: requestId,
+			request: { title: "Planning" },
+		});
+
+		request?.resolve({ ok: false, code: "FORBIDDEN", message: "forbidden" });
+		await expect(pending).resolves.toEqual({ ok: false, code: "FORBIDDEN", message: "forbidden" });
+	});
+
 	it("delivers session closure while a client is snapshotting and backpressured", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
