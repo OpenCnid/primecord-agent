@@ -4130,6 +4130,7 @@ describe("daemon mode helpers", () => {
 			client: owner,
 			supportsExtensionUi: false,
 			supportsDiscordGatewayThreadCreation: true,
+			targetClientId: "gateway-turn",
 		};
 		const internals = daemon as unknown as {
 			requestDiscordGatewayThreadCreation(
@@ -4147,6 +4148,7 @@ describe("daemon mode helpers", () => {
 			activeSessionId: state.activeSessionId,
 			id: requestId,
 			request: { title: "Planning" },
+			targetClientId: "gateway-turn",
 		});
 
 		request?.resolve({ ok: false, code: "FORBIDDEN", message: "forbidden" });

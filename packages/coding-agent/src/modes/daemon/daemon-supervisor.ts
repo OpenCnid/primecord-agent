@@ -28,6 +28,8 @@ import {
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
+import { discordGatewayReadFailure } from "../../core/discord-gateway-read.js";
+import { discordGatewayThreadCreationFailure } from "../../core/discord-gateway-thread.js";
 import {
 	clearOrphanProcessJournal,
 	isOrphanProcessIdentityCurrent,
@@ -319,6 +321,26 @@ interface SupervisorPromptAdmission {
 	workerActiveSessionId?: string;
 }
 
+type DiscordGatewayBrokerRequest = Extract<
+	DaemonOutbound,
+	{ type: "discord_gateway_read_request" | "discord_gateway_thread_creation_request" }
+>;
+
+interface DiscordGatewayBrokerRequestIdentifier {
+	type: DiscordGatewayBrokerRequest["type"];
+	activeSessionId: string;
+	id: string;
+}
+
+interface DiscordGatewayBrokerRequestOwner {
+	client: DaemonSocketClient;
+	worker: ResidentWorker;
+	activeSessionId: string;
+	requestId: string;
+	targetId: string;
+	type: DiscordGatewayBrokerRequest["type"];
+}
+
 function throwIfAdmissionCancelled(admission: SupervisorPromptAdmission | undefined): void {
 	if (admission?.status === "cancelled") throw new PromptAdmissionCancelledError();
 }
@@ -487,6 +509,10 @@ function descriptorKey(socketPath: string): string {
 	return createHash("sha256").update(socketPath).digest("hex").slice(0, 12);
 }
 
+function discordGatewayRequestKey(activeSessionId: string, requestId: string): string {
+	return `${activeSessionId}:${requestId}`;
+}
+
 function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): string {
 	return join(agentDir, "daemon-workers", descriptorKey(socketPath));
 }
@@ -612,6 +638,8 @@ export class DaemonSupervisor {
 			targetId: string;
 		}
 	>();
+	/** Gateway broker replies must come from the exact client selected for the active prompt. */
+	private readonly discordGatewayRequestOwners = new Map<string, DiscordGatewayBrokerRequestOwner>();
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly descriptorDir: string;
 	private readonly generation = randomUUID();
@@ -1066,6 +1094,11 @@ export class DaemonSupervisor {
 			client.detachInput();
 			this.clients.delete(client);
 			this.cancelClientExtensionUi(client, undefined, "disconnected");
+			this.cancelClientDiscordGatewayRequests(
+				client,
+				undefined,
+				"Discord gateway request was cancelled because its client disconnected.",
+			);
 			this.cancelWaitingPromptAdmissionsForClient(client);
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
 				client.attachedActiveSessionIds.delete(activeSessionId);
@@ -1896,6 +1929,27 @@ export class DaemonSupervisor {
 			);
 			throwIfAdmissionCancelled(admission);
 			const resolvedActiveSessionId = match.summary.activeSessionId ?? match.summary.id;
+			const isDiscordGatewayResponse =
+				command.type === "discord_gateway_read_response" ||
+				command.type === "discord_gateway_thread_creation_response";
+			const expectedDiscordGatewayRequestType =
+				command.type === "discord_gateway_read_response"
+					? "discord_gateway_read_request"
+					: command.type === "discord_gateway_thread_creation_response"
+						? "discord_gateway_thread_creation_request"
+						: undefined;
+			const discordGatewayRequestOwner = isDiscordGatewayResponse
+				? this.discordGatewayRequestOwners.get(discordGatewayRequestKey(resolvedActiveSessionId, command.requestId))
+				: undefined;
+			if (
+				isDiscordGatewayResponse &&
+				(!discordGatewayRequestOwner ||
+					discordGatewayRequestOwner.type !== expectedDiscordGatewayRequestType ||
+					discordGatewayRequestOwner.client !== client ||
+					discordGatewayRequestOwner.worker !== match.worker)
+			) {
+				throw new Error("Discord gateway response belongs to another client or active request");
+			}
 			const extensionUiTarget =
 				command.type === "prompt" || command.type === "prompt_and_wait"
 					? this.createExtensionUiTarget(client, resolvedActiveSessionId)
@@ -1930,11 +1984,20 @@ export class DaemonSupervisor {
 								this.extensionUiRequestKey(resolvedActiveSessionId, command.requestId),
 							);
 						}
+						if (isDiscordGatewayResponse) {
+							this.discordGatewayRequestOwners.delete(
+								discordGatewayRequestKey(resolvedActiveSessionId, command.requestId),
+							);
+						}
 						if (admission && response.success) admission.status = "owned";
 						return response;
 					} finally {
 						if (command.type === "prompt_and_wait" && typeof extensionUiTarget === "string") {
 							this.extensionUiTargets.delete(extensionUiTarget);
+							this.cancelTargetDiscordGatewayRequests(
+								extensionUiTarget,
+								"Discord gateway request was cancelled because its prompt ended.",
+							);
 							for (const [requestKey, request] of this.extensionUiRequestOwners) {
 								if (request.targetId === extensionUiTarget) this.extensionUiRequestOwners.delete(requestKey);
 							}
@@ -2002,8 +2065,12 @@ export class DaemonSupervisor {
 
 	private createExtensionUiTarget(client: DaemonSocketClient, activeSessionId: string): string | null {
 		const capabilities = client.capabilitiesByActiveSessionId?.get(activeSessionId);
-		const supportsExtensionUi = capabilities?.has("extension_ui") ?? client.supportsExtensionUi;
-		if (!supportsExtensionUi) return null;
+		const supportsCapability = (capability: DaemonClientCapability): boolean =>
+			capabilities?.has(capability) ?? client.capabilities.has(capability);
+		const supportsExtensionUi = supportsCapability("extension_ui");
+		const supportsDiscordGateway =
+			supportsCapability("discord_gateway_read") || supportsCapability("discord_gateway_thread_creation");
+		if (!supportsExtensionUi && !supportsDiscordGateway) return null;
 		const now = Date.now();
 		for (const [targetId, target] of this.extensionUiTargets) {
 			if (target.expiresAt <= now || !this.clients.has(target.client)) this.extensionUiTargets.delete(targetId);
@@ -2015,6 +2082,127 @@ export class DaemonSupervisor {
 			expiresAt: now + EXTENSION_UI_TARGET_TTL_MS,
 		});
 		return targetId;
+	}
+
+	private respondToWorkerDiscordGatewayRequest(
+		worker: ResidentWorker,
+		request: DiscordGatewayBrokerRequestIdentifier,
+		message: string,
+	): void {
+		if (!worker.client) return;
+		const response =
+			request.type === "discord_gateway_read_request"
+				? {
+						type: "discord_gateway_read_response" as const,
+						activeSessionId: request.activeSessionId,
+						requestId: request.id,
+						response: discordGatewayReadFailure("UNAVAILABLE", message),
+					}
+				: {
+						type: "discord_gateway_thread_creation_response" as const,
+						activeSessionId: request.activeSessionId,
+						requestId: request.id,
+						response: discordGatewayThreadCreationFailure("UNAVAILABLE", message),
+					};
+		void worker.client.request(response).catch((error: unknown) => {
+			this.log(`Could not cancel Discord gateway request: ${String(error)}`);
+		});
+	}
+
+	private routeDiscordGatewayRequest(
+		worker: ResidentWorker,
+		request: DiscordGatewayBrokerRequest,
+	): DaemonSocketClient | undefined {
+		const targetId = request.targetClientId;
+		const target = targetId ? this.extensionUiTargets.get(targetId) : undefined;
+		const capability =
+			request.type === "discord_gateway_read_request" ? "discord_gateway_read" : "discord_gateway_thread_creation";
+		const targetCapabilities = target?.client.capabilitiesByActiveSessionId?.get(request.activeSessionId);
+		const targetSupportsCapability =
+			targetCapabilities?.has(capability) ?? target?.client.capabilities.has(capability);
+		const isValidTarget =
+			target &&
+			target.activeSessionId === request.activeSessionId &&
+			target.expiresAt > Date.now() &&
+			this.clients.has(target.client) &&
+			target.client.attachedActiveSessionIds.has(request.activeSessionId) &&
+			targetSupportsCapability &&
+			target.client.snapshotActiveSessionIds?.has(request.activeSessionId) !== true &&
+			target.client.backpressured !== true;
+		if (!isValidTarget || !targetId) {
+			if (targetId) this.extensionUiTargets.delete(targetId);
+			this.respondToWorkerDiscordGatewayRequest(
+				worker,
+				request,
+				"Discord gateway capability is unavailable for this active request.",
+			);
+			return undefined;
+		}
+		const key = discordGatewayRequestKey(request.activeSessionId, request.id);
+		if (this.discordGatewayRequestOwners.has(key)) {
+			this.respondToWorkerDiscordGatewayRequest(worker, request, "Discord gateway request is already pending.");
+			return undefined;
+		}
+		this.discordGatewayRequestOwners.set(key, {
+			client: target.client,
+			worker,
+			activeSessionId: request.activeSessionId,
+			requestId: request.id,
+			targetId,
+			type: request.type,
+		});
+		return target.client;
+	}
+
+	private cancelClientDiscordGatewayRequests(
+		client: DaemonSocketClient,
+		activeSessionId: string | undefined,
+		message: string,
+	): void {
+		if (!this.discordGatewayRequestOwners) return;
+		for (const [key, request] of this.discordGatewayRequestOwners) {
+			if (
+				request.client !== client ||
+				(activeSessionId !== undefined && request.activeSessionId !== activeSessionId)
+			)
+				continue;
+			this.discordGatewayRequestOwners.delete(key);
+			this.respondToWorkerDiscordGatewayRequest(
+				request.worker,
+				{ type: request.type, activeSessionId: request.activeSessionId, id: request.requestId },
+				message,
+			);
+		}
+	}
+
+	private cancelTargetDiscordGatewayRequests(targetId: string, message: string): void {
+		if (!this.discordGatewayRequestOwners) return;
+		for (const [key, request] of this.discordGatewayRequestOwners) {
+			if (request.targetId !== targetId) continue;
+			this.discordGatewayRequestOwners.delete(key);
+			this.respondToWorkerDiscordGatewayRequest(
+				request.worker,
+				{ type: request.type, activeSessionId: request.activeSessionId, id: request.requestId },
+				message,
+			);
+		}
+	}
+
+	private cancelActiveSessionDiscordGatewayRequests(
+		worker: ResidentWorker,
+		activeSessionId: string,
+		message: string,
+	): void {
+		if (!this.discordGatewayRequestOwners) return;
+		for (const [key, request] of this.discordGatewayRequestOwners) {
+			if (request.worker !== worker || request.activeSessionId !== activeSessionId) continue;
+			this.discordGatewayRequestOwners.delete(key);
+			this.respondToWorkerDiscordGatewayRequest(
+				request.worker,
+				{ type: request.type, activeSessionId: request.activeSessionId, id: request.requestId },
+				message,
+			);
+		}
 	}
 
 	private async handleList(
@@ -2460,15 +2648,29 @@ export class DaemonSupervisor {
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const supportsExtensionUi = [...this.clients].some(
-			(client) => client.attachedActiveSessionIds.has(activeSessionId) && client.supportsExtensionUi,
+		const attachedClients = [...this.clients].filter((client) =>
+			client.attachedActiveSessionIds.has(activeSessionId),
 		);
+		const supportsCapability = (capability: DaemonClientCapability): boolean =>
+			attachedClients.some(
+				(client) =>
+					client.capabilitiesByActiveSessionId?.get(activeSessionId)?.has(capability) ??
+					client.capabilities.has(capability),
+			);
+		const supportsExtensionUi = supportsCapability("extension_ui");
+		const capabilities: DaemonClientCapability[] = [
+			"attach_snapshot",
+			"event_sequence",
+			"slim_attach",
+			"chunked_snapshot",
+		];
+		if (supportsExtensionUi) capabilities.push("extension_ui");
+		if (supportsCapability("discord_gateway_read")) capabilities.push("discord_gateway_read");
+		if (supportsCapability("discord_gateway_thread_creation")) capabilities.push("discord_gateway_thread_creation");
 		const response = await worker.client.requestWorker({
 			type: "worker_subscribe",
 			activeSessionId,
-			capabilities: supportsExtensionUi
-				? ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"]
-				: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+			capabilities,
 			supportsExtensionUi,
 		});
 		if (!response.success) {
@@ -3518,7 +3720,7 @@ export class DaemonSupervisor {
 					lastEventSequence: publicResult.lastEventSequence,
 				});
 			}
-			void this.syncWorkerExtensionUi(activeSessionId);
+			await this.syncWorkerExtensionUi(activeSessionId);
 			return { result: publicResult, worker: match.worker, transcript, releaseTranscript };
 		} catch (error) {
 			releaseTranscript?.();
@@ -3810,6 +4012,11 @@ export class DaemonSupervisor {
 				continue;
 			}
 			this.cancelClientExtensionUi(client, resolvedId, "detached");
+			this.cancelClientDiscordGatewayRequests(
+				client,
+				resolvedId,
+				"Discord gateway request was cancelled because its client detached.",
+			);
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
@@ -4189,6 +4396,8 @@ export class DaemonSupervisor {
 			sessionEventType === "message_end" ||
 			outboundType === "session_replaced" ||
 			outboundType === "extension_ui_request" ||
+			outboundType === "discord_gateway_read_request" ||
+			outboundType === "discord_gateway_thread_creation_request" ||
 			outboundType === "session_resynced" ||
 			outboundType === "session_closed"
 		) {
@@ -4239,6 +4448,16 @@ export class DaemonSupervisor {
 			const { targetClientId: _targetClientId, ...publicOutbound } = decodedOutbound;
 			publicPayload = Buffer.from(serializeJsonLine(publicOutbound));
 		}
+		let discordGatewayTargetClient: DaemonSocketClient | undefined;
+		if (
+			decodedOutbound?.type === "discord_gateway_read_request" ||
+			decodedOutbound?.type === "discord_gateway_thread_creation_request"
+		) {
+			discordGatewayTargetClient = this.routeDiscordGatewayRequest(worker, decodedOutbound);
+			if (!discordGatewayTargetClient) return;
+			const { targetClientId: _targetClientId, ...publicOutbound } = decodedOutbound;
+			publicPayload = Buffer.from(serializeJsonLine(publicOutbound));
+		}
 		const replacementSnapshotFollows =
 			decodedOutbound?.type === "session_replaced" && decodedOutbound.snapshotFollows === true;
 		this.invalidateWorkerSnapshot(
@@ -4250,6 +4469,9 @@ export class DaemonSupervisor {
 		);
 		for (const client of this.clients) {
 			if (!client.attachedActiveSessionIds.has(activeSessionId)) {
+				continue;
+			}
+			if (discordGatewayTargetClient && client !== discordGatewayTargetClient) {
 				continue;
 			}
 			if (replacementSnapshotFollows && !client.capabilities.has("chunked_snapshot")) {
@@ -4278,6 +4500,11 @@ export class DaemonSupervisor {
 			for (const [requestKey, request] of this.extensionUiRequestOwners) {
 				if (request.activeSessionId === activeSessionId) this.extensionUiRequestOwners.delete(requestKey);
 			}
+			this.cancelActiveSessionDiscordGatewayRequests(
+				worker,
+				activeSessionId,
+				"Discord gateway request was cancelled because its active request ended.",
+			);
 		}
 		if (outboundType === "session_replaced" || outboundType === "session_closed") {
 			void this.refreshWorkerSummaries(worker)
