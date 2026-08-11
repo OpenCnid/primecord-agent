@@ -12,6 +12,7 @@ import type { AgentConnectionState } from "../agent-connection/types.js";
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 import { execEnvForSession, withClientEnv } from "./daemon-client-env.js";
+import { currentDaemonExtensionUiExecutionOwner } from "./daemon-extension-ui-owner.js";
 import {
 	type DaemonExtensionUIResponse,
 	type DaemonOutbound,
@@ -20,6 +21,7 @@ import {
 
 export interface ActiveSessionBindingCallbacks {
 	broadcast: (state: ActiveSessionState, message: DaemonOutbound) => void;
+	sendExtensionUi?: (state: ActiveSessionState, message: DaemonOutbound) => void;
 	createConnectionState?: (state: ActiveSessionState) => AgentConnectionState;
 	sessionReplaced?: (state: ActiveSessionState) => void;
 	shutdown: () => void;
@@ -81,7 +83,7 @@ export async function bindActiveSessionState(
 	});
 
 	await session.bindExtensions({
-		uiContext: createExtensionUIContext(state, callbacks.broadcast),
+		uiContext: createExtensionUIContext(state, callbacks),
 		commandContextActions: createCommandContextActions(state),
 		shutdownHandler: callbacks.shutdown,
 		onError: (error) => {
@@ -124,16 +126,18 @@ function createCommandContextActions(state: ActiveSessionState): ExtensionComman
 
 function createExtensionUIContext(
 	state: ActiveSessionState,
-	broadcast: ActiveSessionBindingCallbacks["broadcast"],
+	callbacks: ActiveSessionBindingCallbacks,
 ): ExtensionUIContext {
 	const emitUiRequest = (method: string, payload: Record<string, unknown>): string => {
 		const id = randomUUID();
-		broadcast(state, {
+		const owner = currentDaemonExtensionUiExecutionOwner();
+		(callbacks.sendExtensionUi ?? callbacks.broadcast)(state, {
 			type: "extension_ui_request",
 			activeSessionId: state.activeSessionId,
 			id,
 			method,
 			payload,
+			...(owner?.targetClientId ? { targetClientId: owner.targetClientId } : {}),
 		});
 		return id;
 	};
@@ -250,5 +254,6 @@ function hasExtensionUiClientForMethod(state: ActiveSessionState, method: string
 	if (!isDaemonDialogExtensionUiRequest(method)) {
 		return state.clients.size > 0;
 	}
-	return [...state.clients].some((client) => client.supportsExtensionUi);
+	const owner = currentDaemonExtensionUiExecutionOwner();
+	return Boolean(owner?.supportsExtensionUi && state.clients.has(owner.client));
 }

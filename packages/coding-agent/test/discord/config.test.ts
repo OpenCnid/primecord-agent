@@ -38,6 +38,7 @@ describe("loadDiscordConfig", () => {
 			streamUpdateIntervalMs: 1_000,
 			registerCommands: true,
 			toolProgress: true,
+			extensionUiTimeoutMs: 300_000,
 			cwd,
 			sessionDir: join(stateDir, "sessions"),
 			cacheDir: join(stateDir, "cache"),
@@ -69,6 +70,7 @@ describe("loadDiscordConfig", () => {
 			PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS: "250",
 			PRIME_DISCORD_REGISTER_COMMANDS: "false",
 			PRIME_DISCORD_TOOL_PROGRESS: "false",
+			PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS: "4321",
 			PRIME_DISCORD_CWD: "./workspace",
 			PRIME_DISCORD_SESSION_DIR: "./state/sessions",
 			PRIME_DISCORD_CACHE_DIR: "./state/cache",
@@ -98,6 +100,7 @@ describe("loadDiscordConfig", () => {
 			streamUpdateIntervalMs: 250,
 			registerCommands: false,
 			toolProgress: false,
+			extensionUiTimeoutMs: 4_321,
 			cwd: resolve("./workspace"),
 			sessionDir: resolve("./state/sessions"),
 			cacheDir: resolve("./state/cache"),
@@ -117,6 +120,9 @@ describe("loadDiscordConfig", () => {
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS: "0" })).toThrow(
 			"PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS must be a positive integer",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS: "0" })).toThrow(
+			"PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS must be a positive integer",
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOWED_USERS: "123,not-an-id" })).toThrow(
 			"PRIME_DISCORD_ALLOWED_USERS must contain comma-separated Discord IDs",

@@ -67,6 +67,7 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS` | `1000` | Minimum delay between streamed Discord edits. |
 | `PRIME_DISCORD_REGISTER_COMMANDS` | `true` | Register the gateway's global slash commands at startup. |
 | `PRIME_DISCORD_TOOL_PROGRESS` | `true` | Show tool names while work is in progress. Tool arguments and reasoning remain hidden. |
+| `PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS` | `300000` | Maximum time to wait for a Discord response to an extension dialog. |
 | `PRIME_DISCORD_CWD` | process directory | Fixed working directory for all sessions. `--cwd` takes precedence. |
 | `PRIME_DISCORD_SESSION_DIR` | `~/.prime/agent/discord/sessions` | Discord-to-Prime session mapping and transcript root. |
 | `PRIME_DISCORD_CACHE_DIR` | `~/.prime/agent/discord/cache` | Temporary inbound attachment cache. |
@@ -91,11 +92,17 @@ The gateway registers these global slash commands:
 - `/new` — begin a clean Prime session for this Discord scope.
 - `/abort` — abort current work and clear queued messages.
 - `/status` — show the session, run state, model, and effort.
+- `/capabilities` — list active tools plus discovered context files, extensions, prompts, skills, themes, and invocable commands.
+- `/run` — invoke a discovered extension, prompt-template, or skill command with optional arguments.
 - `/compact` — compact the Prime session context.
 - `/effort` — change reasoning effort.
 - `/model` — select a provider and model ID.
 
 Command authorization uses the same user, role, and channel policy as ordinary messages. Discord may take several minutes to propagate newly registered global commands.
+
+Authorized messages can also use `!prime capabilities` and `!prime run <command> [args]`. The gateway passes discovered commands to Prime Agent without a metadata prefix so extension commands, prompt templates, and skills expand normally. To protect extension UI contents and answers, extension UI is rendered only in bot DMs; server-channel notifications and state are hidden, while a server-channel dialog is cancelled with a prompt to retry privately. In a DM, answer with `!prime respond <value>` or cancel with `!prime cancel`/`!prime abort` so unrelated messages cannot be consumed as dialog input.
+
+Resource discovery uses Prime Agent's normal scopes relative to the fixed gateway working directory. Resources in unrelated repositories are not discovered unless the gateway is started with that repository as `PRIME_DISCORD_CWD`/`--cwd` or the resource is installed in a broader supported scope.
 
 ## Attachments and output safety
 

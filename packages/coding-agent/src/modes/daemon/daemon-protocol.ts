@@ -57,8 +57,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
-export const DAEMON_SCHEMA_REVISION = 14;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-14-816309b1cd50";
+export const DAEMON_SCHEMA_REVISION = 15;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-5d0b4c91a7e3";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -399,6 +399,8 @@ export type DaemonCommand =
 			queueIfBusy?: boolean;
 			expandPromptTemplates?: boolean;
 			source?: InputSource;
+			/** Internal supervisor routing token; public clients should omit it. */
+			extensionUiTarget?: string | null;
 			agentMessageId?: string;
 			customMessage?: CustomMessage;
 			/** Unique only when the caller needs cancellable pre-ownership admission. */
@@ -421,6 +423,8 @@ export type DaemonCommand =
 			queueIfBusy?: boolean;
 			expandPromptTemplates?: boolean;
 			source?: InputSource;
+			/** Internal supervisor routing token; public clients should omit it. */
+			extensionUiTarget?: string | null;
 			/** Unique only when the caller needs cancellable pre-ownership admission. */
 			admissionId?: string;
 	  }
@@ -921,6 +925,8 @@ export type DaemonOutbound =
 			id: string;
 			method: string;
 			payload: Record<string, unknown>;
+			/** Opaque supervisor routing token, removed before delivery to public clients. */
+			targetClientId?: string;
 			meta?: DaemonEventMeta;
 	  }
 	| {

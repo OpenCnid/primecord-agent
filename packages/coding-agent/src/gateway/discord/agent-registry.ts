@@ -31,6 +31,7 @@ export interface DiscordAgentRegistryOptions {
 	runtimeConfig?: AgentSessionRuntimeConfig;
 	statePath?: string;
 	connectionFactory?: DiscordAgentConnectionFactory;
+	eventListener?: (key: string, connection: AgentConnection, event: AgentConnectionEvent) => void | Promise<void>;
 }
 
 export interface DiscordAgentConnectionRequest {
@@ -137,6 +138,7 @@ export class DiscordAgentRegistry {
 		if (event.type === "session_replaced" || event.type === "session_resynced") {
 			await this.refreshMapping(key, connection);
 		}
+		await this.options.eventListener?.(key, connection, event);
 	}
 
 	private async refreshMapping(key: string, connection: AgentConnection): Promise<void> {
@@ -260,7 +262,7 @@ export class DiscordAgentRegistry {
 		return DaemonAgentConnection.attach(client, activeSessionId, {
 			closeClientOnDispose: true,
 			sendClientEnv: false,
-			supportsExtensionUi: false,
+			supportsExtensionUi: true,
 			recoverDaemon: () => ensureInteractiveDaemonRunning(this.options.socketPath, this.options.cwd),
 		});
 	}

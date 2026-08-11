@@ -498,6 +498,76 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 	}, 60_000);
 
+	it("routes overlapping worker extension dialogs only to each initiating public client", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const extensionsDir = join(projectDir, ".prime", "extensions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-extension-ui-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(extensionsDir, { recursive: true });
+		writeFileSync(
+			join(extensionsDir, "owner-dialog.ts"),
+			`export default function (pi) {
+				pi.registerCommand("owner-dialog", {
+					description: "request an owned dialog",
+					handler: async (_args, ctx) => {
+						await ctx.ui.confirm("Owner only", "Proceed?");
+					},
+				});
+			}
+`,
+			"utf8",
+		);
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const firstClient = await connectEventually(socketPath, supervisor);
+		const created = await firstClient.request({
+			type: "create",
+			noSession: true,
+			launchEnv: { TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json") },
+			config: { cwd: projectDir, agentDir, noTools: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.activeSessionId) throw new Error("Worker did not expose its process identity");
+		workerPids.add(summary.workerPid);
+		const secondClient = await connectEventually(socketPath, supervisor);
+		const firstConnection = await DaemonAgentConnection.attach(firstClient, summary.activeSessionId, {
+			supportsExtensionUi: true,
+		});
+		const secondConnection = await DaemonAgentConnection.attach(secondClient, summary.activeSessionId, {
+			supportsExtensionUi: true,
+		});
+		const firstRequests: Array<{ id: string }> = [];
+		const secondRequests: Array<{ id: string }> = [];
+		firstConnection.subscribe((event) => {
+			if (event.type === "extension_ui_request") firstRequests.push(event.request);
+		});
+		secondConnection.subscribe((event) => {
+			if (event.type === "extension_ui_request") secondRequests.push(event.request);
+		});
+
+		const firstPrompt = firstConnection.promptAndWait("/owner-dialog", { source: "rpc" });
+		await waitForCondition(() => firstRequests.length === 1, "First client did not receive its dialog");
+		const secondPrompt = secondConnection.promptAndWait("/owner-dialog", { source: "rpc" });
+		await waitForCondition(() => secondRequests.length === 1, "Second client did not receive its dialog");
+
+		expect(firstRequests).toHaveLength(1);
+		expect(secondRequests).toHaveLength(1);
+		expect(firstRequests[0]?.id).not.toBe(secondRequests[0]?.id);
+		await firstConnection.respondToExtensionUiRequest(firstRequests[0]?.id ?? "", { confirmed: true });
+		await secondConnection.respondToExtensionUiRequest(secondRequests[0]?.id ?? "", { confirmed: false });
+		await Promise.all([firstPrompt, secondPrompt]);
+
+		await firstConnection.dispose();
+		await secondConnection.dispose();
+		firstClient.close();
+		secondClient.close();
+	}, 60_000);
+
 	it("releases an adopted client-owned worker when disposal races supervisor replacement", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
