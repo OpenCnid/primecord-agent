@@ -104,6 +104,12 @@ import {
 	discordGatewayReadFailure,
 	isDiscordGatewayReadResponse,
 } from "../../core/discord-gateway-read.js";
+import {
+	type DiscordGatewayThreadCreationRequest,
+	type DiscordGatewayThreadCreationResponse,
+	discordGatewayThreadCreationFailure,
+	isDiscordGatewayThreadCreationResponse,
+} from "../../core/discord-gateway-thread.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
@@ -1223,6 +1229,7 @@ export class AgentDaemon {
 			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
 			discordGatewayReadRequests: new Map(),
+			discordGatewayThreadCreationRequests: new Map(),
 			eventGeneration: createActiveSessionId(),
 			lastEventSequence: 0,
 			clientEnv,
@@ -1525,6 +1532,9 @@ export class AgentDaemon {
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
 						discordGatewayReadController: this.createDiscordGatewayReadController(() => stateRef),
+						discordGatewayThreadCreationController: this.createDiscordGatewayThreadCreationController(
+							() => stateRef,
+						),
 					},
 				}),
 			);
@@ -3815,6 +3825,10 @@ export class AgentDaemon {
 				const extensionUiOwner = {
 					client,
 					supportsDiscordGatewayRead: daemonClientSupportsDiscordGatewayRead(client, state.activeSessionId),
+					supportsDiscordGatewayThreadCreation: daemonClientSupportsDiscordGatewayThreadCreation(
+						client,
+						state.activeSessionId,
+					),
 					supportsExtensionUi:
 						extensionUiTarget === undefined
 							? daemonClientSupportsExtensionUi(client, state.activeSessionId)
@@ -4566,6 +4580,23 @@ export class AgentDaemon {
 				state.discordGatewayReadRequests?.delete(command.requestId);
 				pending.resolve(command.response);
 				return success(command.id, "discord_gateway_read_response");
+			}
+
+			case "discord_gateway_thread_creation_response": {
+				const state = this.getSessionState(command.activeSessionId);
+				const pending = state.discordGatewayThreadCreationRequests?.get(command.requestId);
+				if (!pending) {
+					throw new Error(`Unknown Discord gateway thread creation request: ${command.requestId}`);
+				}
+				if (pending.ownerClientId !== client.id) {
+					throw new Error("Discord gateway thread creation response belongs to another client");
+				}
+				if (!isDiscordGatewayThreadCreationResponse(command.response)) {
+					throw new Error("Discord gateway thread creation response is invalid");
+				}
+				state.discordGatewayThreadCreationRequests?.delete(command.requestId);
+				pending.resolve(command.response);
+				return success(command.id, "discord_gateway_thread_creation_response");
 			}
 
 			case "prepare_update_restart":
@@ -6097,6 +6128,7 @@ export class AgentDaemon {
 		}
 		cancelPendingExtensionUiRequests(state);
 		cancelPendingDiscordGatewayReadRequests(state);
+		cancelPendingDiscordGatewayThreadCreationRequests(state);
 		if (reason === "killed" || reason === "shutdown" || reason === "replaced" || reason === "update") {
 			await this.abortBashForClose(state);
 		}
@@ -6220,6 +6252,77 @@ export class AgentDaemon {
 			signal?.addEventListener("abort", onAbort, { once: true });
 			this.write(owner.client, {
 				type: "discord_gateway_read_request",
+				activeSessionId: state.activeSessionId,
+				id,
+				request,
+			});
+		});
+	}
+
+	private createDiscordGatewayThreadCreationController(getState: () => ActiveSessionState | undefined): {
+		request(
+			input: DiscordGatewayThreadCreationRequest,
+			signal?: AbortSignal,
+		): Promise<DiscordGatewayThreadCreationResponse>;
+	} {
+		return {
+			request: (input, signal) => {
+				const state = getState();
+				if (!state) {
+					return Promise.resolve(
+						discordGatewayThreadCreationFailure(
+							"UNAVAILABLE",
+							"Discord thread creation is unavailable for this session.",
+						),
+					);
+				}
+				return this.requestDiscordGatewayThreadCreation(state, input, signal);
+			},
+		};
+	}
+
+	private requestDiscordGatewayThreadCreation(
+		state: ActiveSessionState,
+		request: DiscordGatewayThreadCreationRequest,
+		signal?: AbortSignal,
+	): Promise<DiscordGatewayThreadCreationResponse> {
+		if (signal?.aborted) {
+			return Promise.resolve(
+				discordGatewayThreadCreationFailure("UNAVAILABLE", "Discord thread creation was cancelled."),
+			);
+		}
+		const owner = currentDaemonExtensionUiExecutionOwner();
+		if (
+			!owner ||
+			!owner.supportsDiscordGatewayThreadCreation ||
+			!state.clients.has(owner.client) ||
+			!daemonClientSupportsDiscordGatewayThreadCreation(owner.client, state.activeSessionId)
+		) {
+			return Promise.resolve(
+				discordGatewayThreadCreationFailure(
+					"UNAVAILABLE",
+					"Discord thread creation is unavailable outside an active Discord request.",
+				),
+			);
+		}
+		const id = randomUUID();
+		return new Promise((resolve) => {
+			const finish = (response: DiscordGatewayThreadCreationResponse) => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve(response);
+			};
+			const onAbort = () => {
+				if (state.discordGatewayThreadCreationRequests?.delete(id)) {
+					finish(discordGatewayThreadCreationFailure("UNAVAILABLE", "Discord thread creation was cancelled."));
+				}
+			};
+			if (!state.discordGatewayThreadCreationRequests) {
+				state.discordGatewayThreadCreationRequests = new Map();
+			}
+			state.discordGatewayThreadCreationRequests.set(id, { ownerClientId: owner.client.id, resolve: finish });
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.write(owner.client, {
+				type: "discord_gateway_thread_creation_request",
 				activeSessionId: state.activeSessionId,
 				id,
 				request,
@@ -6776,6 +6879,7 @@ export function detachClientFromActiveSession(client: DaemonSocketClient, state:
 		cancelPendingExtensionUiRequests(state);
 	}
 	cancelPendingDiscordGatewayReadRequests(state, client.id);
+	cancelPendingDiscordGatewayThreadCreationRequests(state, client.id);
 }
 
 export function setDaemonClientSessionCapabilities(
@@ -6810,6 +6914,13 @@ function daemonClientSupportsExtensionUi(client: DaemonSocketClient, activeSessi
 
 function daemonClientSupportsDiscordGatewayRead(client: DaemonSocketClient, activeSessionId: string): boolean {
 	return daemonClientCapabilitiesForSession(client, activeSessionId).has("discord_gateway_read");
+}
+
+function daemonClientSupportsDiscordGatewayThreadCreation(
+	client: DaemonSocketClient,
+	activeSessionId: string,
+): boolean {
+	return daemonClientCapabilitiesForSession(client, activeSessionId).has("discord_gateway_thread_creation");
 }
 
 export function markClientSnapshotStreaming(client: DaemonSocketClient, activeSessionId: string): AbortSignal {
@@ -6868,6 +6979,17 @@ export function cancelPendingDiscordGatewayReadRequests(state: ActiveSessionStat
 		if (ownerClientId && pending.ownerClientId !== ownerClientId) continue;
 		state.discordGatewayReadRequests?.delete(id);
 		pending.resolve(discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read was cancelled."));
+	}
+}
+
+export function cancelPendingDiscordGatewayThreadCreationRequests(
+	state: ActiveSessionState,
+	ownerClientId?: string,
+): void {
+	for (const [id, pending] of state.discordGatewayThreadCreationRequests ?? []) {
+		if (ownerClientId && pending.ownerClientId !== ownerClientId) continue;
+		state.discordGatewayThreadCreationRequests?.delete(id);
+		pending.resolve(discordGatewayThreadCreationFailure("UNAVAILABLE", "Discord thread creation was cancelled."));
 	}
 }
 

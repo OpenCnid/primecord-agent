@@ -5,6 +5,7 @@ export interface DaemonExtensionUiExecutionOwner {
 	client: DaemonSocketClient;
 	supportsExtensionUi: boolean;
 	supportsDiscordGatewayRead?: boolean;
+	supportsDiscordGatewayThreadCreation?: boolean;
 	targetClientId?: string;
 }
 

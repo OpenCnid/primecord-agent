@@ -17,6 +17,10 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { DiscordGatewayReadRequest, DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
+import type {
+	DiscordGatewayThreadCreationRequest,
+	DiscordGatewayThreadCreationResponse,
+} from "../../core/discord-gateway-thread.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { CustomMessage } from "../../core/messages.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
@@ -59,8 +63,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 16 adds capability-gated, client-hosted Discord gateway read requests.
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-6723ffcb76c7";
+// Revision 17 adds capability-gated, client-hosted Discord thread-creation requests.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-c8ee0559bf34";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -79,7 +84,8 @@ export type DaemonClientCapability =
 	| "slim_attach"
 	| "chunked_snapshot"
 	| "client_owned_sessions"
-	| "discord_gateway_read";
+	| "discord_gateway_read"
+	| "discord_gateway_thread_creation";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -100,7 +106,8 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
-	| "discord_gateway_read";
+	| "discord_gateway_read"
+	| "discord_gateway_thread_creation";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -127,6 +134,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"chunked_snapshot",
 	"client_owned_sessions",
 	"discord_gateway_read",
+	"discord_gateway_thread_creation",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -615,6 +623,13 @@ export type DaemonCommand =
 			requestId: string;
 			response: DiscordGatewayReadResponse;
 	  }
+	| {
+			id?: string;
+			type: "discord_gateway_thread_creation_response";
+			activeSessionId: string;
+			requestId: string;
+			response: DiscordGatewayThreadCreationResponse;
+	  }
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
@@ -640,6 +655,11 @@ const DISCORD_GATEWAY_READ_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 16,
 	capability: "discord_gateway_read",
+} as const;
+const DISCORD_GATEWAY_THREAD_CREATION_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "discord_gateway_thread_creation",
 } as const;
 const PROMPT_ADMISSION_CANCELLATION_COMMAND = {
 	minProtocol: 7,
@@ -752,6 +772,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_session_entry_label: LEGACY_DAEMON_COMMAND,
 	extension_ui_response: LEGACY_DAEMON_COMMAND,
 	discord_gateway_read_response: DISCORD_GATEWAY_READ_COMMAND,
+	discord_gateway_thread_creation_response: DISCORD_GATEWAY_THREAD_CREATION_COMMAND,
 	prepare_update_restart: LEGACY_DAEMON_COMMAND,
 	retry_worker: LEGACY_DAEMON_COMMAND,
 	restart: LEGACY_DAEMON_COMMAND,
@@ -961,6 +982,13 @@ export type DaemonOutbound =
 			id: string;
 			request: DiscordGatewayReadRequest;
 			meta?: DaemonEventMeta;
+	  }
+	| {
+			type: "discord_gateway_thread_creation_request";
+			activeSessionId: string;
+			id: string;
+			request: DiscordGatewayThreadCreationRequest;
+			meta?: DaemonEventMeta;
 	  };
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
@@ -984,6 +1012,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	session_closed: LEGACY_DAEMON_COMMAND,
 	extension_ui_request: LEGACY_DAEMON_COMMAND,
 	discord_gateway_read_request: DISCORD_GATEWAY_READ_COMMAND,
+	discord_gateway_thread_creation_request: DISCORD_GATEWAY_THREAD_CREATION_COMMAND,
 	extension_error: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonOutbound["type"], DaemonCommandCompatibility>;
 
@@ -1083,6 +1112,7 @@ export function isDaemonMutatingCommand(command: Pick<DaemonCommand, "type">): b
 export const UPDATE_RESTART_DRAIN_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"extension_ui_response",
 	"discord_gateway_read_response",
+	"discord_gateway_thread_creation_response",
 	"abort",
 	"abort_bash",
 	"abort_branch_summary",

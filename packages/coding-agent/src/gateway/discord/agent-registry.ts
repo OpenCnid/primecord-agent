@@ -264,6 +264,7 @@ export class DiscordAgentRegistry {
 			sendClientEnv: false,
 			supportsExtensionUi: true,
 			supportsDiscordGatewayRead: true,
+			supportsDiscordGatewayThreadCreation: true,
 			recoverDaemon: () => ensureInteractiveDaemonRunning(this.options.socketPath, this.options.cwd),
 		});
 	}

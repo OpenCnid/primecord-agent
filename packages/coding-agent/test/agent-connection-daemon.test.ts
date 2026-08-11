@@ -353,6 +353,7 @@ class FakeDaemonClient {
 			case "rename_saved_session":
 			case "extension_ui_response":
 			case "discord_gateway_read_response":
+			case "discord_gateway_thread_creation_response":
 			case "detach":
 				return { type: "response", command: command.type, success: true };
 			case "cancel_rlm_child":
@@ -2655,6 +2656,56 @@ describe("DaemonAgentConnection", () => {
 			activeSessionId: "active-1",
 			requestId: "discord-read-1",
 			response: { ok: false, code: "FORBIDDEN" },
+		});
+	});
+
+	it("forwards capability-gated Discord thread creation requests only for the active session", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			supportsDiscordGatewayThreadCreation: true,
+		});
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			events.push(event);
+		});
+		await connection.attach();
+		expect(fakeClient.requests[0]).toMatchObject({
+			type: "attach",
+			capabilities: expect.arrayContaining(["discord_gateway_thread_creation"]),
+		});
+
+		fakeClient.emitMessage({
+			type: "discord_gateway_thread_creation_request",
+			activeSessionId: "active-1",
+			id: "discord-thread-1",
+			request: { title: "Planning" },
+		});
+		fakeClient.emitMessage({
+			type: "discord_gateway_thread_creation_request",
+			activeSessionId: "other",
+			id: "discord-thread-2",
+			request: { title: "Ignore" },
+		});
+		expect(events).toEqual([
+			{
+				type: "discord_gateway_thread_creation_request",
+				request: { id: "discord-thread-1", request: { title: "Planning" } },
+			},
+		]);
+
+		await connection.respondToDiscordGatewayThreadCreationRequest("discord-thread-1", {
+			ok: true,
+			thread: {
+				id: "500000000000000001",
+				name: "Planning",
+				url: "https://discord.com/channels/100000000000000001/500000000000000001",
+			},
+		});
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "discord_gateway_thread_creation_response",
+			activeSessionId: "active-1",
+			requestId: "discord-thread-1",
+			response: { ok: true, thread: { name: "Planning" } },
 		});
 	});
 

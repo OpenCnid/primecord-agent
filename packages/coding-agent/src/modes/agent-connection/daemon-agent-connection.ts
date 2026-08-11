@@ -15,6 +15,7 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
+import type { DiscordGatewayThreadCreationResponse } from "../../core/discord-gateway-thread.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
@@ -168,6 +169,8 @@ export interface DaemonAgentConnectionOptions {
 	supportsExtensionUi?: boolean;
 	/** Advertise support for permission-scoped Discord gateway reads. */
 	supportsDiscordGatewayRead?: boolean;
+	/** Advertise support for permission-scoped Discord gateway thread creation. */
+	supportsDiscordGatewayThreadCreation?: boolean;
 	/** Dispose the connection by stopping its hidden worker instead of detaching. */
 	ownedSession?: boolean;
 	/** Require the target worker to have been created with telemetry disabled. */
@@ -298,6 +301,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	async attach(): Promise<void> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
 		const supportsDiscordGatewayRead = this.options.supportsDiscordGatewayRead === true;
+		const supportsDiscordGatewayThreadCreation = this.options.supportsDiscordGatewayThreadCreation === true;
 		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
 			type: "attach",
 			activeSessionId: this.activeSessionId,
@@ -308,6 +312,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				"event_sequence",
 				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
 				...(supportsDiscordGatewayRead ? (["discord_gateway_read"] as const) : []),
+				...(supportsDiscordGatewayThreadCreation ? (["discord_gateway_thread_creation"] as const) : []),
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
@@ -739,6 +744,18 @@ export class DaemonAgentConnection implements AgentConnection {
 	async respondToDiscordGatewayReadRequest(requestId: string, response: DiscordGatewayReadResponse): Promise<void> {
 		await this.requestOk({
 			type: "discord_gateway_read_response",
+			activeSessionId: this.activeSessionId,
+			requestId,
+			response,
+		});
+	}
+
+	async respondToDiscordGatewayThreadCreationRequest(
+		requestId: string,
+		response: DiscordGatewayThreadCreationResponse,
+	): Promise<void> {
+		await this.requestOk({
+			type: "discord_gateway_thread_creation_response",
 			activeSessionId: this.activeSessionId,
 			requestId,
 			response,
@@ -1551,6 +1568,13 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (message.type === "discord_gateway_read_request") {
 			await this.emit({
 				type: "discord_gateway_read_request",
+				request: { id: message.id, request: message.request },
+			});
+			return;
+		}
+		if (message.type === "discord_gateway_thread_creation_request") {
+			await this.emit({
+				type: "discord_gateway_thread_creation_request",
 				request: { id: message.id, request: message.request },
 			});
 			return;
