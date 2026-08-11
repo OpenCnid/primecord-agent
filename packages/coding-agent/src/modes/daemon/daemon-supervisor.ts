@@ -72,6 +72,7 @@ import {
 	type DaemonUpdateRestartManifest,
 	failure,
 	isDaemonCommandEnvelope,
+	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
 	success,
@@ -127,6 +128,7 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const EXTENSION_UI_TARGET_TTL_MS = 30 * 60 * 1000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // The whole pre-commit prepare (drain + worker fencing) must finish inside the
@@ -596,6 +598,20 @@ export class DaemonSupervisor {
 	private readonly openingWorkers = new Map<string, Promise<ResidentWorker>>();
 	/** Public admission ids are scoped to the socket that registered them. */
 	private readonly promptAdmissions = new Map<DaemonSocketClient, Map<string, SupervisorPromptAdmission>>();
+	private readonly extensionUiTargets = new Map<
+		string,
+		{ client: DaemonSocketClient; activeSessionId: string; expiresAt: number }
+	>();
+	private readonly extensionUiRequestOwners = new Map<
+		string,
+		{
+			client: DaemonSocketClient;
+			worker: ResidentWorker;
+			activeSessionId: string;
+			requestId: string;
+			targetId: string;
+		}
+	>();
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly descriptorDir: string;
 	private readonly generation = randomUUID();
@@ -1049,6 +1065,7 @@ export class DaemonSupervisor {
 			cleaned = true;
 			client.detachInput();
 			this.clients.delete(client);
+			this.cancelClientExtensionUi(client, undefined, "disconnected");
 			this.cancelWaitingPromptAdmissionsForClient(client);
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
 				client.attachedActiveSessionIds.delete(activeSessionId);
@@ -1878,11 +1895,25 @@ export class DaemonSupervisor {
 				admission?.controller.signal,
 			);
 			throwIfAdmissionCancelled(admission);
+			const resolvedActiveSessionId = match.summary.activeSessionId ?? match.summary.id;
+			const extensionUiTarget =
+				command.type === "prompt" || command.type === "prompt_and_wait"
+					? this.createExtensionUiTarget(client, resolvedActiveSessionId)
+					: undefined;
 			const resolvedCommand = {
 				...command,
-				activeSessionId: match.summary.activeSessionId ?? match.summary.id,
+				activeSessionId: resolvedActiveSessionId,
+				...(extensionUiTarget !== undefined ? { extensionUiTarget } : {}),
 				...(admission ? { admissionId: admission.workerAdmissionId } : {}),
 			} as DaemonCommand;
+			if (command.type === "extension_ui_response") {
+				const requestOwner = this.extensionUiRequestOwners.get(
+					this.extensionUiRequestKey(resolvedActiveSessionId, command.requestId),
+				);
+				if (requestOwner && requestOwner.client !== client) {
+					throw new Error("Extension UI response belongs to another client");
+				}
+			}
 			if (admission) {
 				admission.worker = match.worker;
 				admission.workerActiveSessionId = match.summary.activeSessionId ?? match.summary.id;
@@ -1892,9 +1923,23 @@ export class DaemonSupervisor {
 				(match.summary.activeSessionId ?? match.summary.id) === match.worker.descriptor.rootActiveSessionId;
 			if (!isRootKill) {
 				const forward = async () => {
-					const response = await this.forwardToWorker(match.worker, resolvedCommand);
-					if (admission && response.success) admission.status = "owned";
-					return response;
+					try {
+						const response = await this.forwardToWorker(match.worker, resolvedCommand);
+						if (command.type === "extension_ui_response" && response.success) {
+							this.extensionUiRequestOwners.delete(
+								this.extensionUiRequestKey(resolvedActiveSessionId, command.requestId),
+							);
+						}
+						if (admission && response.success) admission.status = "owned";
+						return response;
+					} finally {
+						if (command.type === "prompt_and_wait" && typeof extensionUiTarget === "string") {
+							this.extensionUiTargets.delete(extensionUiTarget);
+							for (const [requestKey, request] of this.extensionUiRequestOwners) {
+								if (request.targetId === extensionUiTarget) this.extensionUiRequestOwners.delete(requestKey);
+							}
+						}
+					}
 				};
 				if (command.type === "rename" || command.type === "set_session_name") {
 					const reservation = this.summaryNameReservationInput(match.summary, command.name.trim());
@@ -1916,6 +1961,60 @@ export class DaemonSupervisor {
 		} finally {
 			if (admission) this.deletePromptAdmission(admission);
 		}
+	}
+
+	private cancelClientExtensionUi(
+		client: DaemonSocketClient,
+		activeSessionId: string | undefined,
+		reason: string,
+	): void {
+		for (const [targetId, target] of this.extensionUiTargets) {
+			if (target.client === client && (!activeSessionId || target.activeSessionId === activeSessionId)) {
+				this.extensionUiTargets.delete(targetId);
+			}
+		}
+		for (const [requestKey, request] of this.extensionUiRequestOwners) {
+			if (request.client !== client || (activeSessionId && request.activeSessionId !== activeSessionId)) continue;
+			this.extensionUiRequestOwners.delete(requestKey);
+			this.cancelWorkerExtensionUiRequest(request.worker, request.activeSessionId, request.requestId, reason);
+		}
+	}
+
+	private extensionUiRequestKey(activeSessionId: string, requestId: string): string {
+		return `${activeSessionId}:${requestId}`;
+	}
+
+	private cancelWorkerExtensionUiRequest(
+		worker: ResidentWorker,
+		activeSessionId: string,
+		requestId: string,
+		reason: string,
+	): void {
+		void this.forwardToWorker(worker, {
+			type: "extension_ui_response",
+			activeSessionId,
+			requestId,
+			response: { cancelled: true },
+		}).catch((error: unknown) => {
+			this.log(`Could not cancel ${reason} extension UI request: ${String(error)}`);
+		});
+	}
+
+	private createExtensionUiTarget(client: DaemonSocketClient, activeSessionId: string): string | null {
+		const capabilities = client.capabilitiesByActiveSessionId?.get(activeSessionId);
+		const supportsExtensionUi = capabilities?.has("extension_ui") ?? client.supportsExtensionUi;
+		if (!supportsExtensionUi) return null;
+		const now = Date.now();
+		for (const [targetId, target] of this.extensionUiTargets) {
+			if (target.expiresAt <= now || !this.clients.has(target.client)) this.extensionUiTargets.delete(targetId);
+		}
+		const targetId = randomUUID();
+		this.extensionUiTargets.set(targetId, {
+			client,
+			activeSessionId,
+			expiresAt: now + EXTENSION_UI_TARGET_TTL_MS,
+		});
+		return targetId;
 	}
 
 	private async handleList(
@@ -3710,6 +3809,7 @@ export class DaemonSupervisor {
 			if (!client.attachedActiveSessionIds.delete(resolvedId)) {
 				continue;
 			}
+			this.cancelClientExtensionUi(client, resolvedId, "detached");
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
@@ -4088,6 +4188,7 @@ export class DaemonSupervisor {
 			sessionEventType === "message_start" ||
 			sessionEventType === "message_end" ||
 			outboundType === "session_replaced" ||
+			outboundType === "extension_ui_request" ||
 			outboundType === "session_resynced" ||
 			outboundType === "session_closed"
 		) {
@@ -4096,7 +4197,47 @@ export class DaemonSupervisor {
 				this.streamReconstructor.observe(decodedOutbound);
 			} catch {
 				// A malformed worker event is still isolated to this worker connection.
+				if (outboundType === "extension_ui_request") return;
 			}
+		}
+		let extensionUiTargetClient: DaemonSocketClient | undefined;
+		if (decodedOutbound?.type === "extension_ui_request" && decodedOutbound.targetClientId) {
+			const target = this.extensionUiTargets.get(decodedOutbound.targetClientId);
+			const targetCapabilities = target?.client.capabilitiesByActiveSessionId?.get(activeSessionId);
+			const targetSupportsExtensionUi =
+				target && (targetCapabilities?.has("extension_ui") ?? target.client.supportsExtensionUi);
+			const isValidTarget =
+				target &&
+				target.activeSessionId === activeSessionId &&
+				target.expiresAt > Date.now() &&
+				this.clients.has(target.client) &&
+				target.client.attachedActiveSessionIds.has(activeSessionId) &&
+				targetSupportsExtensionUi;
+			if (!isValidTarget) {
+				this.extensionUiTargets.delete(decodedOutbound.targetClientId);
+				if (isDaemonDialogExtensionUiRequest(decodedOutbound.method)) {
+					this.cancelWorkerExtensionUiRequest(worker, activeSessionId, decodedOutbound.id, "orphaned");
+				}
+				return;
+			}
+			if (target.client.snapshotActiveSessionIds?.has(activeSessionId) || target.client.backpressured === true) {
+				if (isDaemonDialogExtensionUiRequest(decodedOutbound.method)) {
+					this.cancelWorkerExtensionUiRequest(worker, activeSessionId, decodedOutbound.id, "undeliverable");
+				}
+				return;
+			}
+			extensionUiTargetClient = target.client;
+			if (isDaemonDialogExtensionUiRequest(decodedOutbound.method)) {
+				this.extensionUiRequestOwners.set(this.extensionUiRequestKey(activeSessionId, decodedOutbound.id), {
+					client: target.client,
+					worker,
+					activeSessionId,
+					requestId: decodedOutbound.id,
+					targetId: decodedOutbound.targetClientId,
+				});
+			}
+			const { targetClientId: _targetClientId, ...publicOutbound } = decodedOutbound;
+			publicPayload = Buffer.from(serializeJsonLine(publicOutbound));
 		}
 		const replacementSnapshotFollows =
 			decodedOutbound?.type === "session_replaced" && decodedOutbound.snapshotFollows === true;
@@ -4114,8 +4255,11 @@ export class DaemonSupervisor {
 			if (replacementSnapshotFollows && !client.capabilities.has("chunked_snapshot")) {
 				continue;
 			}
-			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
-				continue;
+			if (outboundType === "extension_ui_request") {
+				if (extensionUiTargetClient && client !== extensionUiTargetClient) continue;
+				const capabilities = client.capabilitiesByActiveSessionId?.get(activeSessionId);
+				if (!extensionUiTargetClient && !(capabilities?.has("extension_ui") ?? client.supportsExtensionUi))
+					continue;
 			}
 			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
@@ -4126,6 +4270,14 @@ export class DaemonSupervisor {
 				continue;
 			}
 			this.writeSerialized(client, publicPayload);
+		}
+		if (outboundType === "session_closed") {
+			for (const [targetId, target] of this.extensionUiTargets) {
+				if (target.activeSessionId === activeSessionId) this.extensionUiTargets.delete(targetId);
+			}
+			for (const [requestKey, request] of this.extensionUiRequestOwners) {
+				if (request.activeSessionId === activeSessionId) this.extensionUiRequestOwners.delete(requestKey);
+			}
 		}
 		if (outboundType === "session_replaced" || outboundType === "session_closed") {
 			void this.refreshWorkerSummaries(worker)

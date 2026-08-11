@@ -77,6 +77,8 @@ function createHarness(
 		clients: new Set(),
 		protocolClientIds: new WeakMap(),
 		promptAdmissions: new Map(),
+		extensionUiTargets: new Map<string, never>(),
+		extensionUiRequestOwners: new Map<string, never>(),
 		mutationDrain: new MutationDrainLatch(),
 		commandJournal: options.commandJournal ?? {
 			lookup: vi.fn(() => undefined),

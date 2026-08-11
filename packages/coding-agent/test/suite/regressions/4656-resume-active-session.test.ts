@@ -253,6 +253,8 @@ describe("ENG-4656 active session resume", () => {
 		});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			clients: new Set([movingClient, sourcePeer, targetPeer]),
+			extensionUiTargets: new Map<string, never>(),
+			extensionUiRequestOwners: new Map<string, never>(),
 			findWorker: vi.fn(async () => ({ worker: targetWorker, summary: targetSummary })),
 			reserveSnapshotStream: vi.fn(() => {
 				operations.push("reserve");

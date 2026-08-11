@@ -1,10 +1,18 @@
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Client } from "discord.js";
+import { type Client, MessageType } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
+import type { DiscordAgentConnectionFactory } from "../../src/gateway/discord/agent-registry.js";
 import { DiscordBridge } from "../../src/gateway/discord/bridge.js";
 import type { DiscordBridgeConfig } from "../../src/gateway/discord/config.js";
+import type {
+	AgentConnection,
+	AgentConnectionEvent,
+	AgentConnectionEventListener,
+	AgentConnectionSlashCommand,
+	AgentConnectionState,
+} from "../../src/modes/agent-connection/types.js";
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -84,6 +92,7 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		streamUpdateIntervalMs: 1_000,
 		registerCommands: false,
 		toolProgress: true,
+		extensionUiTimeoutMs: 300_000,
 		cwd: stateRoot,
 		sessionDir: join(stateRoot, "sessions"),
 		cacheDir: join(stateRoot, "cache"),
@@ -91,13 +100,146 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 	};
 }
 
-function createBridge(client: FakeDiscordClient, overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridge {
+function createBridge(
+	client: FakeDiscordClient,
+	overrides: Partial<DiscordBridgeConfig> = {},
+	connectionFactory?: DiscordAgentConnectionFactory,
+): DiscordBridge {
 	return new DiscordBridge(config(overrides), {
 		agentDir: join(tmpdir(), "prime-discord-bridge-agent"),
 		socketPath: join(tmpdir(), "prime-discord-bridge-daemon.sock"),
 		client: client.asClient(),
 		logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+		...(connectionFactory ? { connectionFactory } : {}),
 	});
+}
+
+function bridgeState(sessionFile: string): AgentConnectionState {
+	return {
+		activeSessionId: "active-1",
+		cwd: "/project",
+		model: undefined,
+		thinkingLevel: "medium",
+		serviceTier: "default",
+		availableThinkingLevels: ["minimal", "low", "medium", "high", "xhigh"],
+		isStreaming: false,
+		isCompacting: false,
+		isBashRunning: false,
+		retryAttempt: 0,
+		steeringMode: "all",
+		followUpMode: "one-at-a-time",
+		sessionFile,
+		sessionId: "active-1",
+		sessionDir: "/sessions",
+		leafId: null,
+		autoCompactionEnabled: true,
+		messageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		compactionCount: 0,
+		goal: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
+		scopedModels: [],
+		activeToolNames: ["ipython"],
+		contextUsage: undefined,
+	};
+}
+
+class FakeBridgeConnection {
+	private readonly listeners = new Set<AgentConnectionEventListener>();
+	private readonly responseGate = deferred<void>();
+	readonly prompts: string[] = [];
+	readonly extensionResponses: Array<{ id: string; response: Record<string, unknown> }> = [];
+	extensionRequest: AgentConnectionEvent | undefined;
+	lastAssistantText = "resource response";
+	responseFailures = 0;
+
+	constructor(
+		private readonly state: AgentConnectionState,
+		private readonly commands: readonly AgentConnectionSlashCommand[],
+	) {}
+
+	subscribe(listener: AgentConnectionEventListener): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	async getState(): Promise<AgentConnectionState> {
+		return this.state;
+	}
+
+	async getCommands(): Promise<readonly AgentConnectionSlashCommand[]> {
+		return this.commands;
+	}
+
+	async promptAndWait(prompt: string): Promise<void> {
+		this.prompts.push(prompt);
+		if (!this.extensionRequest) return;
+		for (const listener of this.listeners) void listener(this.extensionRequest);
+		await this.responseGate.promise;
+	}
+
+	async waitForIdle(): Promise<void> {}
+
+	async getLastAssistantText(): Promise<string> {
+		return this.lastAssistantText;
+	}
+
+	async respondToExtensionUiRequest(id: string, response: Record<string, unknown>): Promise<void> {
+		if (this.responseFailures > 0) {
+			this.responseFailures--;
+			throw new Error("temporary response failure");
+		}
+		this.extensionResponses.push({ id, response });
+		this.responseGate.resolve();
+	}
+
+	async abortAndClearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+		return { steering: [], followUp: [] };
+	}
+
+	async dispose(): Promise<void> {}
+
+	asAgentConnection(): AgentConnection {
+		return this as unknown as AgentConnection;
+	}
+}
+
+function resourceCommand(name: string, source: AgentConnectionSlashCommand["source"]): AgentConnectionSlashCommand {
+	return {
+		name,
+		registeredName: name.replaceAll(":", "-"),
+		source,
+		sourceInfo: { path: `/resources/${name}`, source: "test", scope: "project", origin: "top-level" },
+	};
+}
+
+function createRunInteraction(
+	channel: object,
+	command: string,
+	guildId: string | null = null,
+): {
+	interaction: object;
+	deferReply: ReturnType<typeof vi.fn>;
+	editReply: ReturnType<typeof vi.fn>;
+} {
+	const deferReply = vi.fn(async (_payload: unknown) => undefined);
+	const editReply = vi.fn(async (_payload: unknown) => undefined);
+	return {
+		interaction: {
+			isChatInputCommand: () => true,
+			channel,
+			channelId: "dm-1",
+			guildId,
+			member: null,
+			user: { id: "user-1", bot: false },
+			commandName: "run",
+			inGuild: () => guildId !== null,
+			options: { getString: (_name: string, _required: boolean) => command },
+			deferReply,
+			editReply,
+		},
+		deferReply,
+		editReply,
+	};
 }
 
 describe("DiscordBridge lifecycle", () => {
@@ -209,6 +351,146 @@ describe("DiscordBridge lifecycle", () => {
 		memberLookup.resolve({ roles: { cache: new Map([["role-1", {}]]) } });
 		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
 		expect(editReply.mock.calls[0]?.[0]).toMatchObject({ content: expect.stringContaining("/new") });
+		await bridge.stop();
+	});
+
+	it("submits discovered commands as raw Prime Agent slash invocations", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(bridgeState(join(tmpdir(), "prime-discord-resource-session.jsonl")), [
+			resourceCommand("skill:websearch", "skill"),
+		]);
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, {}, factory);
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			send: vi.fn(async () => ({ edit: vi.fn(), delete: vi.fn() })),
+		};
+		const { interaction, editReply } = createRunInteraction(channel, "skill:websearch current weather");
+		await bridge.start();
+
+		client.emit("interactionCreate", interaction);
+		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
+
+		expect(connection.prompts).toEqual(["/skill:websearch current weather"]);
+		expect(editReply.mock.calls[0]?.[0]).toEqual({
+			content: "resource response",
+			allowedMentions: { parse: [], repliedUser: false },
+		});
+		await bridge.stop();
+	});
+
+	it("keeps extension dialogs private to DMs and recovers a failed response submission", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-extension-session.jsonl")),
+			[resourceCommand("choose", "extension")],
+		);
+		connection.extensionRequest = {
+			type: "extension_ui_request",
+			request: {
+				id: "dialog-1",
+				method: "confirm",
+				payload: { title: "Continue", message: "Proceed?" },
+			},
+		};
+		connection.responseFailures = 1;
+		const sends: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			isDMBased: () => true,
+			send: vi.fn(async (payload: { content?: string }) => {
+				sends.push(payload);
+				return { edit: vi.fn(), delete: vi.fn() };
+			}),
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, {}, factory);
+		const { interaction, editReply } = createRunInteraction(channel, "choose");
+		const responseMessage = (id: string, content: string) => ({
+			id,
+			content,
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false },
+			mentions: { users: { has: () => false, some: () => false } },
+			inGuild: () => false,
+		});
+		await bridge.start();
+
+		client.emit("interactionCreate", interaction);
+		await vi.waitFor(() =>
+			expect(sends.some((payload) => payload.content?.includes("!prime respond yes"))).toBe(true),
+		);
+		expect(editReply).not.toHaveBeenCalled();
+
+		client.emit("messageCreate", responseMessage("unrelated", "yes"));
+		await vi.waitFor(() =>
+			expect(sends.some((payload) => payload.content?.includes("Use `!prime respond <value>`"))).toBe(true),
+		);
+		expect(connection.extensionResponses).toEqual([]);
+
+		client.emit("messageCreate", responseMessage("first-response", "!prime respond yes"));
+		await vi.waitFor(() => expect(sends.some((payload) => payload.content?.includes("Could not submit"))).toBe(true));
+		expect(connection.extensionResponses).toEqual([]);
+		expect(editReply).not.toHaveBeenCalled();
+
+		client.emit("messageCreate", responseMessage("retry-response", "!prime respond yes"));
+		await vi.waitFor(() => expect(connection.extensionResponses).toHaveLength(1));
+		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
+		expect(connection.extensionResponses).toEqual([{ id: "dialog-1", response: { confirmed: true } }]);
+		expect(editReply.mock.calls[0]?.[0]).toMatchObject({
+			content: "Prime Agent extension command completed.",
+		});
+		await bridge.stop();
+	});
+
+	it("cancels guild extension dialogs without publishing their private payload", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-guild-extension-session.jsonl")),
+			[resourceCommand("secret-input", "extension")],
+		);
+		connection.extensionRequest = {
+			type: "extension_ui_request",
+			request: {
+				id: "guild-dialog-1",
+				method: "input",
+				payload: { title: "Private credential", placeholder: "sensitive-prefill" },
+			},
+		};
+		const sends: Array<{ content?: string }> = [];
+		const channel = {
+			id: "guild-channel-1",
+			isThread: () => false,
+			isSendable: () => true,
+			isDMBased: () => false,
+			send: vi.fn(async (payload: { content?: string }) => {
+				sends.push(payload);
+				return { edit: vi.fn(), delete: vi.fn() };
+			}),
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, {}, factory);
+		const { interaction, editReply } = createRunInteraction(channel, "secret-input", "guild-1");
+		await bridge.start();
+
+		client.emit("interactionCreate", interaction);
+		await vi.waitFor(() => expect(connection.extensionResponses).toHaveLength(1));
+		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
+
+		expect(connection.extensionResponses).toEqual([{ id: "guild-dialog-1", response: { cancelled: true } }]);
+		expect(sends.map((payload) => payload.content).join("\n")).toContain("Run this command in a bot DM");
+		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("Private credential");
+		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("sensitive-prefill");
 		await bridge.stop();
 	});
 });

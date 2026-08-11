@@ -27,6 +27,7 @@ export interface DiscordBridgeConfig {
 	streamUpdateIntervalMs: number;
 	registerCommands: boolean;
 	toolProgress: boolean;
+	extensionUiTimeoutMs: number;
 	cwd: string;
 	sessionDir: string;
 	cacheDir: string;
@@ -135,6 +136,7 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		streamUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS", 1_000),
 		registerCommands: readBoolean(env, "PRIME_DISCORD_REGISTER_COMMANDS", true),
 		toolProgress: readBoolean(env, "PRIME_DISCORD_TOOL_PROGRESS", true),
+		extensionUiTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS", 300_000),
 		cwd,
 		sessionDir: readPath(env, "PRIME_DISCORD_SESSION_DIR", join(discordStateDir, "sessions")),
 		cacheDir: readPath(env, "PRIME_DISCORD_CACHE_DIR", join(discordStateDir, "cache")),

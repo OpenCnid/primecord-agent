@@ -22,6 +22,7 @@ import {
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { withDaemonExtensionUiExecutionOwner } from "../src/modes/daemon/daemon-extension-ui-owner.js";
 import {
 	AgentDaemon,
 	cancelPendingExtensionUiRequests,
@@ -4065,6 +4066,51 @@ describe("daemon mode helpers", () => {
 				activeSessionId: "other",
 			}),
 		).toBe(false);
+	});
+
+	it("routes overlapping extension UI execution contexts only to their owners", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const state = makeState("active");
+		const firstOwner = makeClient("first-owner", state.activeSessionId, true);
+		const secondOwner = makeClient("second-owner", state.activeSessionId, true);
+		const observer = makeClient("observer", state.activeSessionId, true);
+		const firstWrite = vi.fn(() => true);
+		const secondWrite = vi.fn(() => true);
+		const observerWrite = vi.fn(() => true);
+		firstOwner.socket = { destroyed: false, write: firstWrite } as unknown as Socket;
+		secondOwner.socket = { destroyed: false, write: secondWrite } as unknown as Socket;
+		observer.socket = { destroyed: false, write: observerWrite } as unknown as Socket;
+		state.clients.add(firstOwner);
+		state.clients.add(secondOwner);
+		state.clients.add(observer);
+		const internals = daemon as unknown as {
+			sendExtensionUiToExecutionOwner(state: ActiveSessionState, message: DaemonOutbound): void;
+		};
+		const sendOwnedRequest = async (client: DaemonSocketClient, id: string) =>
+			withDaemonExtensionUiExecutionOwner({ client, supportsExtensionUi: true }, async () => {
+				await Promise.resolve();
+				internals.sendExtensionUiToExecutionOwner(state, {
+					type: "extension_ui_request",
+					activeSessionId: state.activeSessionId,
+					id,
+					method: "confirm",
+					payload: { title: "Confirm", message: "Proceed?" },
+				});
+			});
+
+		await Promise.all([
+			sendOwnedRequest(firstOwner, "first-request"),
+			sendOwnedRequest(secondOwner, "second-request"),
+		]);
+
+		expect(firstWrite).toHaveBeenCalledOnce();
+		expect(secondWrite).toHaveBeenCalledOnce();
+		expect(observerWrite).not.toHaveBeenCalled();
 	});
 
 	it("delivers session closure while a client is snapshotting and backpressured", () => {

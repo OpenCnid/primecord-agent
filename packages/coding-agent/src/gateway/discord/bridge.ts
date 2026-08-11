@@ -14,15 +14,31 @@ import {
 	SlashCommandBuilder,
 	ThreadAutoArchiveDuration,
 } from "discord.js";
-import type { AgentConnectionEvent } from "../../modes/agent-connection/types.js";
-import { DiscordAgentRegistry } from "./agent-registry.js";
+import type {
+	AgentConnection,
+	AgentConnectionEvent,
+	AgentConnectionExtensionUiRequest,
+	AgentConnectionExtensionUiResponse,
+} from "../../modes/agent-connection/types.js";
+import { type DiscordAgentConnectionFactory, DiscordAgentRegistry } from "./agent-registry.js";
 import {
 	type DiscordAttachmentDescriptor,
 	type ProcessedDiscordAttachments,
 	processDiscordAttachments,
 } from "./attachments.js";
+import {
+	formatDiscordCapabilities,
+	parseDiscordTextControl,
+	resolveDiscordResourceInvocation,
+} from "./capabilities.js";
 import type { DiscordBridgeConfig } from "./config.js";
 import { DiscordDispatchQueue, DiscordMessageDedupe } from "./dispatch-queue.js";
+import {
+	type DiscordExtensionDialogMethod,
+	parseDiscordExtensionReplyControl,
+	parseDiscordExtensionUiInput,
+	presentDiscordExtensionUi,
+} from "./extension-ui.js";
 import {
 	createDiscordResponseWriter,
 	DISCORD_ALLOWED_MENTIONS,
@@ -43,6 +59,7 @@ export interface DiscordBridgeOptions {
 	agentDir: string;
 	socketPath: string;
 	client?: Client;
+	connectionFactory?: DiscordAgentConnectionFactory;
 	shutdownTimeoutMs?: number;
 	logger?: Pick<Console, "info" | "warn" | "error">;
 }
@@ -52,6 +69,16 @@ const COMMANDS = [
 	new SlashCommandBuilder().setName("new").setDescription("Start a new Prime Agent session here"),
 	new SlashCommandBuilder().setName("abort").setDescription("Abort the active run and clear queued messages"),
 	new SlashCommandBuilder().setName("status").setDescription("Show the active Prime Agent session status"),
+	new SlashCommandBuilder().setName("capabilities").setDescription("List discovered Prime Agent capabilities"),
+	new SlashCommandBuilder()
+		.setName("run")
+		.setDescription("Run a discovered extension, prompt, or skill command")
+		.addStringOption((option) =>
+			option
+				.setName("command")
+				.setDescription("Command and arguments, for example: skill:websearch query")
+				.setRequired(true),
+		),
 	new SlashCommandBuilder()
 		.setName("compact")
 		.setDescription("Compact the active Prime Agent session")
@@ -80,8 +107,27 @@ const COMMANDS = [
 		.addStringOption((option) => option.setName("model").setDescription("Model ID").setRequired(true)),
 ];
 
+interface ActiveExtensionUiOwner {
+	userId: string;
+	channel: SendableChannels;
+	connection: AgentConnection;
+}
+
+interface PendingExtensionDialog {
+	requestId: string;
+	connection: AgentConnection;
+	userId: string;
+	method: DiscordExtensionDialogMethod;
+	options: readonly string[];
+	messages: Message[];
+	responding: boolean;
+	timeout?: ReturnType<typeof setTimeout>;
+}
+
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 const MAX_HISTORY_CONTEXT_CHARS = 8_000;
+const MAX_INTERACTION_RESPONSE_CHARS = 1_900;
+const EXTENSION_UI_RETRY_MS = 5_000;
 const ROLE_LOOKUP_CACHE_MS = 60_000;
 const MAX_ROLE_LOOKUP_CACHE_ENTRIES = 10_000;
 
@@ -91,6 +137,9 @@ export class DiscordBridge {
 	private readonly registry: DiscordAgentRegistry;
 	private readonly dispatchQueue = new DiscordDispatchQueue();
 	private readonly dedupe = new DiscordMessageDedupe();
+	private readonly activeExtensionUiOwners = new Map<string, ActiveExtensionUiOwner>();
+	private readonly pendingExtensionDialogs = new Map<string, PendingExtensionDialog>();
+	private readonly extensionUiMessages = new Map<string, Message>();
 	private readonly roleLookups = new Map<
 		string,
 		{ expiresAt: number; result: Promise<readonly string[] | undefined> }
@@ -118,6 +167,8 @@ export class DiscordBridge {
 			agentDir: options.agentDir,
 			sessionRoot: config.sessionDir,
 			socketPath: options.socketPath,
+			connectionFactory: options.connectionFactory,
+			eventListener: this.onRegistryConnectionEvent,
 		});
 	}
 
@@ -180,6 +231,27 @@ export class DiscordBridge {
 		this.logger.error(`Discord client error: ${safeErrorMessage(error, this.config.botToken)}`);
 	};
 
+	private readonly onRegistryConnectionEvent = (
+		key: string,
+		connection: AgentConnection,
+		event: AgentConnectionEvent,
+	): void => {
+		if (event.type === "extension_error") {
+			this.logger.warn(
+				`Prime Agent extension failed (${event.extensionPath}, ${event.event}): ${safeErrorMessage(event.error, this.config.botToken)}`,
+			);
+			return;
+		}
+		if (event.type !== "extension_ui_request") return;
+		const owner = this.activeExtensionUiOwners.get(key);
+		if (!owner || owner.connection !== connection) return;
+		void this.handleExtensionUiRequest(key, owner.userId, owner.channel, connection, event.request).catch(
+			(error: unknown) => {
+				this.logger.warn(`Discord extension UI failed: ${safeErrorMessage(error, this.config.botToken)}`);
+			},
+		);
+	};
+
 	private readonly onInvalidated = (): void => {
 		this.fatalError = new Error("Discord gateway session was invalidated and cannot reconnect");
 		this.logger.error(this.fatalError.message);
@@ -201,20 +273,20 @@ export class DiscordBridge {
 			botUser.id,
 			await this.resolveAuthorRoleIds(message.author.id, message.member, message.guildId),
 		);
+		const sourceKey = createDiscordMessageSessionKey(message, sourceChannel, this.config.groupSessionsPerUser);
+		if (this.pendingExtensionDialogs.has(sourceKey)) {
+			const inputDecision = routeMessage({ ...routeInput, mentionsBot: true }, this.config);
+			if (inputDecision.action === "respond" && this.dedupe.add(message.id)) {
+				await this.consumeExtensionDialog(message, sourceChannel, sourceKey);
+			}
+			return;
+		}
+
 		const decision = routeMessage(routeInput, this.config);
 		if (decision.action === "ignore" || !this.dedupe.add(message.id)) return;
 
 		const targetChannel = decision.createThread ? await this.createThread(message, sourceChannel) : sourceChannel;
-		const targetKind: DiscordChannelKind = targetChannel.isThread() ? "thread" : message.inGuild() ? "guild" : "dm";
-		const sessionKey = createDiscordSessionKey(
-			{
-				kind: targetKind,
-				channelId: targetChannel.id,
-				guildId: message.guildId ?? undefined,
-				userId: message.author.id,
-			},
-			{ groupSessionsPerUser: this.config.groupSessionsPerUser },
-		);
+		const sessionKey = createDiscordMessageSessionKey(message, targetChannel, this.config.groupSessionsPerUser);
 
 		await this.dispatchQueue.enqueue(sessionKey, async () => {
 			await this.processMessage(message, targetChannel, sessionKey, decision);
@@ -237,6 +309,35 @@ export class DiscordBridge {
 		let writerFinalized = false;
 		let unsubscribe: (() => void) | undefined;
 		try {
+			const connection = await this.registry.getOrCreate(sessionKey);
+			const strippedContent = stripBotMention(message.content, botUser.id);
+			const textControl = parseDiscordTextControl(strippedContent);
+			if (textControl?.type === "capabilities") {
+				const [state, resources, commands] = await Promise.all([
+					connection.getState(),
+					connection.getResourceSnapshot(),
+					connection.getCommands(),
+				]);
+				await safeSend(targetChannel, formatDiscordCapabilities(state, resources, commands));
+				if (this.config.reactions) await safeReaction(message, "✅");
+				return;
+			}
+
+			const resourceInput =
+				textControl?.type === "run"
+					? textControl.input
+					: strippedContent.startsWith("/")
+						? strippedContent
+						: undefined;
+			const invocation = resourceInput
+				? resolveDiscordResourceInvocation(resourceInput, await connection.getCommands())
+				: undefined;
+			if (textControl?.type === "run" && !invocation) {
+				throw new Error(
+					"Unknown Prime Agent extension, prompt, or skill command. Use /capabilities to list commands.",
+				);
+			}
+
 			const descriptors = attachmentDescriptors(message);
 			if (descriptors.length > 0 && this.config.maxAttachments === 0) {
 				throw new Error("Discord attachments are disabled for this gateway");
@@ -250,7 +351,7 @@ export class DiscordBridge {
 				maxTotalBytes: attachmentTotalLimit(this.config.maxAttachmentBytes, this.config.maxAttachments),
 				inlineTextMaxBytes: 100 * 1024,
 			});
-			const connection = await this.registry.getOrCreate(sessionKey);
+
 			writer = await createDiscordResponseWriter(responseChannel(targetChannel, message), {
 				updateIntervalMs: this.config.streamUpdateIntervalMs,
 				placeholderText: "Prime Agent is working…",
@@ -274,15 +375,26 @@ export class DiscordBridge {
 					if (progress) writer?.append(progress);
 				}
 			});
-			const prompt = await this.buildPrompt(message, botUser.id, decision, attachments.promptNotes);
-			await connection.promptAndWait(prompt, { images: attachments.images, source: "rpc" });
-			const finalText = streamedText || (await connection.getLastAssistantText());
+			const prompt = invocation
+				? [invocation.prompt, ...attachments.promptNotes].join("\n\n")
+				: await this.buildPrompt(message, botUser.id, decision, attachments.promptNotes);
+			const promptImages = attachments.images;
+			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, async () => {
+				await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
+				if (invocation?.command.source === "extension") await connection.waitForIdle();
+			});
+			const finalText =
+				streamedText ||
+				(invocation?.command.source === "extension"
+					? "Prime Agent extension command completed."
+					: await connection.getLastAssistantText());
 			const deliveryErrorsBeforeFinish = writer.deliveryErrors.length;
 			const result = await writer.finish(finalText);
 			writerFinalized = true;
 			if (result.deliveryErrors.length > deliveryErrorsBeforeFinish) {
 				throw new Error("Discord could not deliver the complete response");
 			}
+
 			if (this.config.reactions) await safeReaction(message, "✅");
 		} catch (error) {
 			const messageText = safeErrorMessage(error, this.config.botToken);
@@ -427,16 +539,22 @@ export class DiscordBridge {
 		switch (interaction.commandName) {
 			case "new": {
 				this.dispatchQueue.clear(key);
+				await this.cancelPendingExtensionDialog(key);
+				await this.clearExtensionUiMessages(key);
 				const existing = this.registry.getExisting(key);
 				if (existing) await existing.abortAndClearQueue();
+				await this.discardPendingExtensionDialogForKey(key);
 				const result = await this.registry.newSession(key);
 				return result.cancelled ? "New session cancelled." : "Started a new Prime Agent session.";
 			}
 			case "abort": {
 				this.dispatchQueue.clear(key);
+				await this.cancelPendingExtensionDialog(key);
+				await this.clearExtensionUiMessages(key);
 				const connection = this.registry.getExisting(key);
 				if (!connection) return "There is no active Prime Agent session here.";
 				await connection.abortAndClearQueue();
+				await this.discardPendingExtensionDialogForKey(key);
 				return "Abort requested and queued messages cleared.";
 			}
 			case "status": {
@@ -449,6 +567,55 @@ export class DiscordBridge {
 					`Model: ${state.model ? `${state.model.provider}/${state.model.id}` : "not configured"}`,
 					`Effort: ${state.thinkingLevel}`,
 				].join("\n");
+			}
+			case "capabilities": {
+				const connection = await this.registry.getOrCreate(key);
+				const [state, resources, commands] = await Promise.all([
+					connection.getState(),
+					connection.getResourceSnapshot(),
+					connection.getCommands(),
+				]);
+				return truncateText(formatDiscordCapabilities(state, resources, commands), MAX_INTERACTION_RESPONSE_CHARS);
+			}
+			case "run": {
+				const channel = interaction.channel;
+				if (!channel?.isSendable()) throw new Error("Discord command channel is unavailable");
+				let result = "Prime Agent command was cleared before it ran.";
+				await this.dispatchQueue.enqueue(key, async () => {
+					const connection = await this.registry.getOrCreate(key);
+					const invocation = resolveDiscordResourceInvocation(
+						interaction.options.getString("command", true),
+						await connection.getCommands(),
+					);
+					if (!invocation) {
+						throw new Error(
+							"Unknown Prime Agent extension, prompt, or skill command. Use /capabilities to list commands.",
+						);
+					}
+					let streamedText = "";
+					const unsubscribe = connection.subscribe((event) => {
+						const delta = textDelta(event);
+						if (delta) streamedText += delta;
+					});
+					try {
+						await this.withExtensionUiOwner(key, interaction.user.id, channel, connection, async () => {
+							await connection.promptAndWait(invocation.prompt, { source: "rpc" });
+							if (invocation.command.source === "extension") await connection.waitForIdle();
+						});
+						const text =
+							streamedText ||
+							(invocation.command.source === "extension"
+								? "Prime Agent extension command completed."
+								: await connection.getLastAssistantText());
+						result = truncateText(
+							text || "Prime Agent command completed without a text response.",
+							MAX_INTERACTION_RESPONSE_CHARS,
+						);
+					} finally {
+						unsubscribe();
+					}
+				});
+				return result;
 			}
 			case "compact": {
 				const connection = await this.registry.getOrCreate(key);
@@ -470,6 +637,275 @@ export class DiscordBridge {
 			}
 			default:
 				throw new Error(`Unknown Discord command: ${interaction.commandName}`);
+		}
+	}
+
+	private deferExtensionUiCancellation(connection: AgentConnection, requestId: string): void {
+		setTimeout(() => {
+			void connection.respondToExtensionUiRequest(requestId, { cancelled: true }).catch((error: unknown) => {
+				this.logger.warn(`Discord extension cancellation failed: ${safeErrorMessage(error, this.config.botToken)}`);
+			});
+		}, 0);
+	}
+
+	private async withExtensionUiOwner<T>(
+		sessionKey: string,
+		userId: string,
+		channel: SendableChannels,
+		connection: AgentConnection,
+		run: () => Promise<T>,
+	): Promise<T> {
+		const owner: ActiveExtensionUiOwner = { userId, channel, connection };
+		this.activeExtensionUiOwners.set(sessionKey, owner);
+		let completed = false;
+		try {
+			const result = await run();
+			completed = true;
+			return result;
+		} finally {
+			await this.cancelPendingExtensionDialog(sessionKey);
+			const pending = this.pendingExtensionDialogs.get(sessionKey);
+			if (completed && pending?.connection === connection) {
+				await this.discardPendingExtensionDialog(sessionKey, pending);
+			}
+			if (this.activeExtensionUiOwners.get(sessionKey) === owner) {
+				this.activeExtensionUiOwners.delete(sessionKey);
+			}
+		}
+	}
+
+	private async handleExtensionUiRequest(
+		sessionKey: string,
+		userId: string,
+		channel: SendableChannels,
+		connection: AgentConnection,
+		request: AgentConnectionExtensionUiRequest,
+	): Promise<void> {
+		const presentation = presentDiscordExtensionUi(request);
+		if (presentation.kind === "unsupported") {
+			if (presentation.dialog) this.deferExtensionUiCancellation(connection, request.id);
+			return;
+		}
+		if (!channel.isDMBased()) {
+			if (presentation.kind === "dialog") {
+				this.deferExtensionUiCancellation(connection, request.id);
+				await safeSend(channel, "Prime Agent cancelled a private extension dialog. Run this command in a bot DM.");
+			}
+			return;
+		}
+		if (presentation.kind === "notification") {
+			await safeSend(channel, presentation.content);
+			return;
+		}
+		if (presentation.kind === "state") {
+			await this.updateExtensionUiMessage(sessionKey, channel, presentation.key, presentation.content);
+			return;
+		}
+
+		await this.cancelPendingExtensionDialog(sessionKey);
+		const requestedTimeout = presentation.timeoutMs ?? this.config.extensionUiTimeoutMs;
+		const timeoutMs = Math.min(requestedTimeout, this.config.extensionUiTimeoutMs);
+		const pending: PendingExtensionDialog = {
+			requestId: request.id,
+			connection,
+			userId,
+			method: presentation.method,
+			options: presentation.options,
+			messages: [],
+			responding: false,
+		};
+		this.pendingExtensionDialogs.set(sessionKey, pending);
+		this.scheduleExtensionDialogTimeout(sessionKey, pending, channel, timeoutMs);
+		try {
+			for (const content of splitDiscordMessage(presentation.content)) {
+				if (this.pendingExtensionDialogs.get(sessionKey) !== pending) break;
+				const message = await channel.send({ content, allowedMentions: DISCORD_ALLOWED_MENTIONS });
+				if (this.pendingExtensionDialogs.get(sessionKey) !== pending) {
+					await message.delete().catch(() => undefined);
+					break;
+				}
+				pending.messages.push(message);
+			}
+		} catch (error) {
+			try {
+				await this.finishExtensionDialog(sessionKey, pending, { cancelled: true });
+			} catch {
+				this.scheduleExtensionDialogTimeout(sessionKey, pending, channel, EXTENSION_UI_RETRY_MS);
+			}
+			throw error;
+		}
+	}
+
+	private scheduleExtensionDialogTimeout(
+		sessionKey: string,
+		pending: PendingExtensionDialog,
+		channel: SendableChannels,
+		delayMs: number,
+	): void {
+		if (this.pendingExtensionDialogs.get(sessionKey) !== pending) return;
+		if (pending.timeout) clearTimeout(pending.timeout);
+		pending.timeout = setTimeout(() => {
+			pending.timeout = undefined;
+			void this.finishExtensionDialog(sessionKey, pending, { cancelled: true })
+				.then((finished) => {
+					if (finished) return safeSend(channel, "Prime Agent extension request timed out.");
+					if (this.pendingExtensionDialogs.get(sessionKey) === pending) {
+						this.scheduleExtensionDialogTimeout(sessionKey, pending, channel, EXTENSION_UI_RETRY_MS);
+					}
+				})
+				.catch((error: unknown) => {
+					this.logger.warn(
+						`Discord extension timeout cleanup failed: ${safeErrorMessage(error, this.config.botToken)}`,
+					);
+					if (this.pendingExtensionDialogs.get(sessionKey) === pending) {
+						this.scheduleExtensionDialogTimeout(sessionKey, pending, channel, EXTENSION_UI_RETRY_MS);
+					}
+				});
+		}, delayMs);
+	}
+
+	private async updateExtensionUiMessage(
+		sessionKey: string,
+		channel: SendableChannels,
+		key: string,
+		content: string | undefined,
+	): Promise<void> {
+		const messageKey = `${sessionKey}:${key}`;
+		const existing = this.extensionUiMessages.get(messageKey);
+		if (!content) {
+			this.extensionUiMessages.delete(messageKey);
+			await existing?.delete().catch(() => undefined);
+			return;
+		}
+		const payload = {
+			content: truncateText(content, MAX_INTERACTION_RESPONSE_CHARS),
+			allowedMentions: DISCORD_ALLOWED_MENTIONS,
+		};
+		if (existing) {
+			try {
+				await existing.edit(payload);
+				return;
+			} catch {
+				this.extensionUiMessages.delete(messageKey);
+			}
+		}
+		const sent = await channel.send(payload);
+		this.extensionUiMessages.set(messageKey, sent);
+	}
+
+	private async clearExtensionUiMessages(sessionKey?: string): Promise<void> {
+		const prefix = sessionKey ? `${sessionKey}:` : undefined;
+		const messages: Message[] = [];
+		for (const [key, message] of this.extensionUiMessages) {
+			if (prefix && !key.startsWith(prefix)) continue;
+			this.extensionUiMessages.delete(key);
+			messages.push(message);
+		}
+		await Promise.allSettled(messages.map((message) => message.delete()));
+	}
+
+	private async consumeExtensionDialog(
+		message: Message,
+		channel: SendableChannels,
+		sessionKey: string,
+	): Promise<void> {
+		const pending = this.pendingExtensionDialogs.get(sessionKey);
+		if (!pending) return;
+		if (pending.userId !== message.author.id) {
+			await safeSend(channel, "That extension request is waiting for the user who started it.");
+			return;
+		}
+		const content = this.client.user ? stripBotMention(message.content, this.client.user.id) : message.content.trim();
+		if (/^!prime\s+status$/i.test(content)) {
+			const state = await pending.connection.getState();
+			await safeSend(
+				channel,
+				`Prime Agent is ${state.isStreaming ? "working" : "idle"}; an extension response is still pending.`,
+			);
+			return;
+		}
+		const abortRequested = /^!prime\s+abort$/i.test(content);
+		const control = abortRequested ? { type: "cancel" as const } : parseDiscordExtensionReplyControl(content);
+		if (!control) {
+			await safeSend(
+				channel,
+				"An extension response is pending. Use `!prime respond <value>`, `!prime cancel`, or `!prime abort`.",
+			);
+			return;
+		}
+		const parsed = parseDiscordExtensionUiInput(
+			pending.method,
+			pending.options,
+			control.type === "cancel" ? "cancel" : control.value,
+		);
+		if (!parsed.accepted) {
+			await safeSend(channel, parsed.error);
+			return;
+		}
+		let finished = false;
+		try {
+			finished = await this.finishExtensionDialog(sessionKey, pending, parsed.response);
+		} catch (error) {
+			this.logger.warn(`Discord extension response failed: ${safeErrorMessage(error, this.config.botToken)}`);
+			if (!abortRequested) {
+				await safeSend(channel, "Could not submit the extension response. Retry it or use `!prime abort`.");
+				return;
+			}
+		}
+		if (abortRequested) {
+			await pending.connection.abortAndClearQueue();
+			await this.discardPendingExtensionDialog(sessionKey, pending);
+			await this.clearExtensionUiMessages(sessionKey);
+			await safeSend(channel, "Extension request cancelled and abort requested.");
+			return;
+		}
+		if (!finished) {
+			await safeSend(channel, "The extension response is already being submitted.");
+			return;
+		}
+		await safeSend(channel, "Extension response accepted.");
+	}
+
+	private async finishExtensionDialog(
+		sessionKey: string,
+		pending: PendingExtensionDialog,
+		response: AgentConnectionExtensionUiResponse,
+	): Promise<boolean> {
+		if (this.pendingExtensionDialogs.get(sessionKey) !== pending || pending.responding) return false;
+		pending.responding = true;
+		try {
+			await pending.connection.respondToExtensionUiRequest(pending.requestId, response);
+		} catch (error) {
+			pending.responding = false;
+			throw error;
+		}
+		pending.responding = false;
+		if (this.pendingExtensionDialogs.get(sessionKey) !== pending) return false;
+		this.pendingExtensionDialogs.delete(sessionKey);
+		if (pending.timeout) clearTimeout(pending.timeout);
+		await Promise.allSettled(pending.messages.map((message) => message.delete()));
+		return true;
+	}
+
+	private async discardPendingExtensionDialogForKey(sessionKey: string): Promise<void> {
+		const pending = this.pendingExtensionDialogs.get(sessionKey);
+		if (pending) await this.discardPendingExtensionDialog(sessionKey, pending);
+	}
+
+	private async discardPendingExtensionDialog(sessionKey: string, pending: PendingExtensionDialog): Promise<void> {
+		if (this.pendingExtensionDialogs.get(sessionKey) !== pending) return;
+		this.pendingExtensionDialogs.delete(sessionKey);
+		if (pending.timeout) clearTimeout(pending.timeout);
+		await Promise.allSettled(pending.messages.map((message) => message.delete()));
+	}
+
+	private async cancelPendingExtensionDialog(sessionKey: string): Promise<void> {
+		const pending = this.pendingExtensionDialogs.get(sessionKey);
+		if (!pending) return;
+		try {
+			await this.finishExtensionDialog(sessionKey, pending, { cancelled: true });
+		} catch (error) {
+			this.logger.warn(`Discord extension cancellation failed: ${safeErrorMessage(error, this.config.botToken)}`);
 		}
 	}
 
@@ -526,6 +962,11 @@ export class DiscordBridge {
 	private async stopInternal(): Promise<void> {
 		try {
 			this.accepting = false;
+			await Promise.allSettled(
+				[...this.pendingExtensionDialogs.keys()].map((key) => this.cancelPendingExtensionDialog(key)),
+			);
+			this.activeExtensionUiOwners.clear();
+			await this.clearExtensionUiMessages();
 			this.client.off("messageCreate", this.onMessage);
 			this.client.off("interactionCreate", this.onInteraction);
 			this.client.off("error", this.onClientError);
@@ -536,6 +977,10 @@ export class DiscordBridge {
 				await this.registry.abortAll();
 				await settlesBefore(drain, Math.min(5_000, this.shutdownTimeoutMs));
 			}
+			if (this.pendingExtensionDialogs.size > 0) await this.registry.abortAll();
+			await Promise.allSettled(
+				[...this.pendingExtensionDialogs.keys()].map((key) => this.discardPendingExtensionDialogForKey(key)),
+			);
 			await this.registry.dispose();
 			await this.client.destroy();
 		} finally {
@@ -557,6 +1002,23 @@ function discordClientOptions(config: DiscordBridgeConfig): ClientOptions {
 		partials: [Partials.Channel],
 		allowedMentions: { parse: [], repliedUser: false },
 	};
+}
+
+function createDiscordMessageSessionKey(
+	message: Message,
+	channel: SendableChannels,
+	groupSessionsPerUser: boolean,
+): string {
+	const kind: DiscordChannelKind = channel.isThread() ? "thread" : message.inGuild() ? "guild" : "dm";
+	return createDiscordSessionKey(
+		{
+			kind,
+			channelId: channel.id,
+			guildId: message.guildId ?? undefined,
+			userId: message.author.id,
+		},
+		{ groupSessionsPerUser },
+	);
 }
 
 function messageRouteInput(
@@ -714,6 +1176,8 @@ function commandHelp(): string {
 		"/new — start a new session",
 		"/abort — stop the active run and clear queued messages",
 		"/status — show session, model, and effort",
+		"/capabilities — list discovered tools and resources",
+		"/run — invoke a discovered extension, prompt, or skill command",
 		"/compact — compact session context",
 		"/effort — set reasoning effort",
 		"/model — set provider and model ID",

@@ -141,6 +141,10 @@ import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
+	currentDaemonExtensionUiExecutionOwner,
+	withDaemonExtensionUiExecutionOwner,
+} from "./daemon-extension-ui-owner.js";
+import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_DEFAULT_CLIENT_CAPABILITIES,
@@ -1230,6 +1234,8 @@ export class AgentDaemon {
 			}
 			await bindActiveSessionState(state, {
 				broadcast: (targetSessionState, message) => this.broadcastToSession(targetSessionState, message),
+				sendExtensionUi: (targetSessionState, message) =>
+					this.sendExtensionUiToExecutionOwner(targetSessionState, message),
 				createConnectionState: (targetSessionState) => this.createConnectionState(targetSessionState),
 				sessionReplaced: (targetSessionState) => this.refreshReplacedSessionState(targetSessionState),
 				shutdown: () => {
@@ -3797,14 +3803,25 @@ export class AgentDaemon {
 							}
 						: {}),
 				};
+				const extensionUiTarget = command.extensionUiTarget;
+				const extensionUiOwner = {
+					client,
+					supportsExtensionUi:
+						extensionUiTarget === undefined
+							? daemonClientSupportsExtensionUi(client, state.activeSessionId)
+							: extensionUiTarget !== null,
+					...(typeof extensionUiTarget === "string" ? { targetClientId: extensionUiTarget } : {}),
+				};
 				if (command.type === "prompt_and_wait") {
 					try {
-						await this.promptWithAgentMessagePreparingGuard(state, command.message, {
-							...options,
-							preflightResult: (didSucceed) => {
-								if (didSucceed) this.recordWorkerRecoveryState(state, "prompt_accepted", true);
-							},
-						});
+						await withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
+							this.promptWithAgentMessagePreparingGuard(state, command.message, {
+								...options,
+								preflightResult: (didSucceed) => {
+									if (didSucceed) this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+								},
+							}),
+						);
 						return success(command.id, command.type);
 					} finally {
 						clearAdmission();
@@ -3818,24 +3835,26 @@ export class AgentDaemon {
 					responseSent = true;
 					this.write(client, success(command.id, "prompt"));
 				};
-				void this.promptWithAgentMessagePreparingGuard(
-					state,
-					command.message,
-					{
-						...options,
-						agentMessageId: command.agentMessageId,
-						customMessage: command.customMessage,
-						preflightResult: (didSucceed) => {
-							if (didSucceed) {
-								this.recordWorkerRecoveryState(state, "prompt_accepted", true);
-								sendSuccessResponse();
-							} else {
-								preflightRejected = true;
-							}
+				void withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
+					this.promptWithAgentMessagePreparingGuard(
+						state,
+						command.message,
+						{
+							...options,
+							agentMessageId: command.agentMessageId,
+							customMessage: command.customMessage,
+							preflightResult: (didSucceed) => {
+								if (didSucceed) {
+									this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+									sendSuccessResponse();
+								} else {
+									preflightRejected = true;
+								}
+							},
 						},
-					},
-					undefined,
-					false,
+						undefined,
+						false,
+					),
 				)
 					.then(() => {
 						if (preflightRejected) {
@@ -3852,7 +3871,9 @@ export class AgentDaemon {
 							this.write(client, failure(command.id, "prompt", error, serializeDaemonError(error)));
 						}
 					})
-					.finally(clearAdmission);
+					.finally(() => {
+						clearAdmission();
+					});
 				return undefined;
 			}
 
@@ -6114,6 +6135,15 @@ export class AgentDaemon {
 			}
 		}
 		return cascadeError;
+	}
+
+	private sendExtensionUiToExecutionOwner(state: ActiveSessionState, message: DaemonOutbound): void {
+		const owner = currentDaemonExtensionUiExecutionOwner();
+		if (owner) {
+			if (owner.supportsExtensionUi && state.clients.has(owner.client)) this.write(owner.client, message);
+			return;
+		}
+		this.broadcastToSession(state, message);
 	}
 
 	private broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void {
