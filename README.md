@@ -32,11 +32,11 @@ PrimeCord Agent: Prime Agent with a Discord Gateway
 
 PrimeCord Agent extends [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) with a secure, persistent Discord gateway. It brings the full Prime Agent harness into Discord while retaining daemon-backed sessions, tools, subagents, and continual harness state.
 
-- **Discord-native conversations:** authorized DMs, mention-based server routing, free-response channels, and automatic threads.
+- **Discord-native conversations:** authorized DMs, mention-based server routing, free-response channels, automatic threads, and explicit `/thread` conversations.
 - **Durable isolated sessions:** per-user conversation histories reconnect to resident Prime Agent workers after gateway restarts.
-- **Live agent output:** streamed replies, tool-progress updates, reactions, safe 2,000-character splitting, and Markdown fence handling.
+- **Live agent output:** streamed replies, tool-progress updates, reactions, safe 2,000-character splitting, Markdown fence handling, and native workspace artifact uploads with `MEDIA:/path`.
 - **Images and files:** bounded Discord CDN downloads, actual MIME detection, image input, controlled file caching, and cleanup.
-- **Operational controls:** `/new`, `/abort`, `/status`, `/compact`, `/effort`, `/model`, and `/help` slash commands.
+- **Operational controls:** `/new`, `/thread`, `/abort`, `/status`, `/compact`, `/effort`, `/model`, and `/help` slash commands.
 - **Secure defaults:** fail-closed user, role, and channel allowlists; mention suppression; bot-loop prevention; and graceful shutdown.
 
 Start the gateway after configuring a Discord application and an access policy:

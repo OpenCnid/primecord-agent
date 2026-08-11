@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 - Added a secure Discord gateway with mention and thread routing, per-user persistent resident sessions, streaming responses, attachments, allowlists, and session-management slash commands.
+- Added `/thread` to create an isolated Prime Agent conversation thread from a Discord server channel.
+- Added Hermes-compatible `MEDIA:/path` output tags for safely uploading agent-generated workspace artifacts to Discord.
 - Added Discord access to discovered tools, context files, extensions, prompt templates, skills, themes, resource commands, and extension UI requests.
 - Changed daemon extension UI delivery to bind each request to the client that initiated its prompt, including through resident workers.
 - Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.

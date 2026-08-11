@@ -12,7 +12,7 @@ Prime Agent can run as a persistent Discord bot backed by the same resident daem
 4. Grant **View Channels**, **Send Messages**, **Read Message History**, **Send Messages in Threads**, **Create Public Threads**, and **Add Reactions**. **Embed Links** and **Attach Files** are recommended.
 5. Open the generated URL to add the bot to the server. Copy the bot token, but never commit it or place it in a Prime Agent prompt.
 
-The gateway responds to every authorized DM. In servers it requires an explicit mention by default. An eligible mention in a normal text channel starts a thread; later messages in that thread do not need another mention.
+The gateway responds to every authorized DM. In servers it requires an explicit mention by default. An eligible mention in a normal text channel starts a thread; later messages in that thread do not need another mention. Use `/thread` with a title to explicitly create a fresh Prime Agent conversation thread without sending an initial prompt.
 
 ## Configure access
 
@@ -63,6 +63,8 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_HISTORY_BACKFILL_LIMIT` | `50` | Maximum recent messages inspected for initial context; `0` disables it. |
 | `PRIME_DISCORD_MAX_ATTACHMENT_BYTES` | `33554432` | Per-file download limit; `0` means unlimited. |
 | `PRIME_DISCORD_MAX_ATTACHMENTS` | `5` | Maximum files on one message; `0` disables attachments. |
+| `PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENT_BYTES` | `26214400` | Per-file `MEDIA:` upload limit; `0` means unlimited. |
+| `PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENTS` | `5` | Maximum agent-generated `MEDIA:` uploads in one response; `0` disables uploads. |
 | `PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS` | `30000` | Attachment download timeout. |
 | `PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS` | `1000` | Minimum delay between streamed Discord edits. |
 | `PRIME_DISCORD_REGISTER_COMMANDS` | `true` | Register the gateway's global slash commands at startup. |
@@ -90,6 +92,7 @@ The gateway registers these global slash commands:
 
 - `/help` — show the command list.
 - `/new` — begin a clean Prime session for this Discord scope.
+- `/thread <title>` — create a new Discord thread with a clean Prime Agent session. It is available only in server text and announcement channels.
 - `/abort` — abort current work and clear queued messages.
 - `/status` — show the session, run state, model, and effort.
 - `/capabilities` — list active tools plus discovered context files, extensions, prompts, skills, themes, and invocable commands.
@@ -110,7 +113,9 @@ The gateway accepts only Discord CDN attachment URLs, checks count and byte limi
 
 Responses are split at Discord's 2,000-character limit with Markdown fences balanced across messages. Generated output cannot create `@everyone`, role, or user notifications because outgoing allowed mentions are disabled.
 
-The bridge handles text, images, and arbitrary inbound files. Discord voice channels and proactive scheduled delivery are not currently bridged.
+Agent responses can upload workspace artifacts using Hermes-compatible `MEDIA:/path/to/file` tags. The tag is removed from the text and the file is uploaded natively; relative paths resolve from `PRIME_DISCORD_CWD`. For safety, resolved files must remain inside that fixed workspace, including after symlink resolution. Uploads use the outbound count and byte limits above; rejected tags leave the text response intact with a delivery notice.
+
+The bridge handles text, images, arbitrary inbound files, and agent-generated media uploads. Discord voice channels and proactive scheduled delivery are not currently bridged.
 
 ## Shutdown and diagnostics
 

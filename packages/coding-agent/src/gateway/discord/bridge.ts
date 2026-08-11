@@ -9,9 +9,11 @@ import {
 	type Interaction,
 	type Message,
 	MessageType,
+	type NewsChannel,
 	Partials,
 	type SendableChannels,
 	SlashCommandBuilder,
+	type TextChannel,
 	ThreadAutoArchiveDuration,
 } from "discord.js";
 import type {
@@ -39,6 +41,7 @@ import {
 	parseDiscordExtensionUiInput,
 	presentDiscordExtensionUi,
 } from "./extension-ui.js";
+import { type DiscordOutboundMedia, extractDiscordMedia, loadDiscordOutboundMedia } from "./outbound-media.js";
 import {
 	createDiscordResponseWriter,
 	DISCORD_ALLOWED_MENTIONS,
@@ -67,6 +70,10 @@ export interface DiscordBridgeOptions {
 const COMMANDS = [
 	new SlashCommandBuilder().setName("help").setDescription("Show Prime Agent Discord commands"),
 	new SlashCommandBuilder().setName("new").setDescription("Start a new Prime Agent session here"),
+	new SlashCommandBuilder()
+		.setName("thread")
+		.setDescription("Create a new Prime Agent conversation thread")
+		.addStringOption((option) => option.setName("title").setDescription("Thread title").setRequired(true)),
 	new SlashCommandBuilder().setName("abort").setDescription("Abort the active run and clear queued messages"),
 	new SlashCommandBuilder().setName("status").setDescription("Show the active Prime Agent session status"),
 	new SlashCommandBuilder().setName("capabilities").setDescription("List discovered Prime Agent capabilities"),
@@ -388,12 +395,24 @@ export class DiscordBridge {
 				(invocation?.command.source === "extension"
 					? "Prime Agent extension command completed."
 					: await connection.getLastAssistantText());
+			const extractedMedia = extractDiscordMedia(finalText ?? "");
+			const outboundMedia = await loadDiscordOutboundMedia(extractedMedia.paths, {
+				cwd: this.config.cwd,
+				maxAttachments: this.config.maxOutboundAttachments,
+				maxBytesPerAttachment: unlimitedAsSafeInteger(this.config.maxOutboundAttachmentBytes),
+			});
+			const responseText = formatDiscordMediaResponse(
+				extractedMedia.text,
+				outboundMedia.attachments.length,
+				outboundMedia.errors,
+			);
 			const deliveryErrorsBeforeFinish = writer.deliveryErrors.length;
-			const result = await writer.finish(finalText);
+			const result = await writer.finish(responseText);
 			writerFinalized = true;
 			if (result.deliveryErrors.length > deliveryErrorsBeforeFinish) {
 				throw new Error("Discord could not deliver the complete response");
 			}
+			await sendDiscordMedia(targetChannel, outboundMedia.attachments);
 
 			if (this.config.reactions) await safeReaction(message, "✅");
 		} catch (error) {
@@ -537,6 +556,8 @@ export class DiscordBridge {
 
 	private async runCommand(interaction: ChatInputCommandInteraction, key: string): Promise<string> {
 		switch (interaction.commandName) {
+			case "thread":
+				return this.createConversationThread(interaction);
 			case "new": {
 				this.dispatchQueue.clear(key);
 				await this.cancelPendingExtensionDialog(key);
@@ -638,6 +659,33 @@ export class DiscordBridge {
 			default:
 				throw new Error(`Unknown Discord command: ${interaction.commandName}`);
 		}
+	}
+
+	private async createConversationThread(interaction: ChatInputCommandInteraction): Promise<string> {
+		const channel = interaction.channel;
+		if (!isDiscordThreadParentChannel(channel)) {
+			throw new Error("The /thread command must be used in a server text or announcement channel");
+		}
+		const requestedTitle = interaction.options.getString("title", true).trim();
+		if (!requestedTitle) throw new Error("Thread title cannot be empty");
+		const thread = await channel.threads.create({
+			name: truncateText(requestedTitle, 100),
+			autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
+			reason: "Prime Agent conversation requested with /thread",
+		});
+		if (!thread.isSendable()) throw new Error("Discord created a thread that cannot receive messages");
+		const key = createDiscordSessionKey(
+			{
+				kind: "thread",
+				channelId: thread.id,
+				guildId: interaction.guildId ?? undefined,
+				userId: interaction.user.id,
+			},
+			{ groupSessionsPerUser: this.config.groupSessionsPerUser },
+		);
+		await this.registry.getOrCreate(key);
+		await safeSend(thread, "Started a new Prime Agent session. Send a message in this thread to begin.");
+		return `Created a new Prime Agent conversation in <#${thread.id}>.`;
 	}
 
 	private deferExtensionUiCancellation(connection: AgentConnection, requestId: string): void {
@@ -1004,6 +1052,12 @@ function discordClientOptions(config: DiscordBridgeConfig): ClientOptions {
 	};
 }
 
+function isDiscordThreadParentChannel(
+	channel: ChatInputCommandInteraction["channel"],
+): channel is TextChannel | NewsChannel {
+	return Boolean(channel?.isTextBased() && !channel.isDMBased() && !channel.isThread() && !channel.isThreadOnly());
+}
+
 function createDiscordMessageSessionKey(
 	message: Message,
 	channel: SendableChannels,
@@ -1136,6 +1190,30 @@ function attachmentTotalLimit(perAttachment: number, count: number): number {
 	return Number.isSafeInteger(total) ? total : Number.MAX_SAFE_INTEGER;
 }
 
+function formatDiscordMediaResponse(text: string, attachmentCount: number, errors: readonly string[]): string {
+	const status =
+		attachmentCount > 0
+			? `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`
+			: errors.length > 0
+				? "Prime Agent could not attach the requested media."
+				: undefined;
+	const failureNote =
+		errors.length > 0 && attachmentCount > 0 ? "Some requested media could not be attached." : undefined;
+	return [text, status, failureNote].filter((section): section is string => Boolean(section)).join("\n\n");
+}
+
+async function sendDiscordMedia(
+	channel: SendableChannels,
+	attachments: readonly DiscordOutboundMedia[],
+): Promise<void> {
+	for (const attachment of attachments) {
+		await channel.send({
+			files: [{ attachment: attachment.content, name: attachment.name }],
+			allowedMentions: { parse: [], repliedUser: false },
+		});
+	}
+}
+
 async function safeTyping(channel: SendableChannels): Promise<void> {
 	await channel.sendTyping().catch(() => undefined);
 }
@@ -1174,6 +1252,7 @@ function commandHelp(): string {
 	return [
 		"Prime Agent Discord commands:",
 		"/new — start a new session",
+		"/thread — create a new conversation thread in this channel",
 		"/abort — stop the active run and clear queued messages",
 		"/status — show session, model, and effort",
 		"/capabilities — list discovered tools and resources",
