@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
-import type { DaemonClientCapability, DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
+import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 
 type DiscordGatewayBrokerRequest = Extract<
@@ -15,6 +15,10 @@ interface BrokerRequestOwner {
 	requestId: string;
 	targetId: string;
 	type: DiscordGatewayBrokerRequest["type"];
+}
+
+interface SupervisorCommandHarness {
+	handleLine(client: DaemonSocketClient, line: string): Promise<void>;
 }
 
 interface BrokerHarness {
@@ -61,6 +65,39 @@ function threadRequest(activeSessionId: string, targetClientId?: string): Discor
 }
 
 describe("daemon supervisor Discord broker routing", () => {
+	it("accepts a Discord thread response at the supervisor command ingress", async () => {
+		const activeSessionId = "active-1";
+		const client = gatewayClient(activeSessionId, ["discord_gateway_thread_creation"]);
+		const command: Extract<DaemonCommand, { type: "discord_gateway_thread_creation_response" }> = {
+			id: "response-1",
+			type: "discord_gateway_thread_creation_response",
+			activeSessionId,
+			requestId: "request-1",
+			response: { ok: false, code: "UNAVAILABLE", message: "cancelled" },
+		};
+		const handleCommand = vi.fn(async () => ({
+			type: "response" as const,
+			id: command.id,
+			command: command.type,
+			success: true,
+		}));
+		const write = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			parseCommandAndRegisterPromptAdmission: vi.fn(() => ({ command, protocolVersion: 7 })),
+			ready: Promise.resolve(),
+			protocolClientIds: new Map(),
+			cancelOwnedWorkerCleanup: vi.fn(),
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			handleCommand,
+			write,
+		}) as SupervisorCommandHarness;
+
+		await supervisor.handleLine(client, "ignored");
+		expect(handleCommand).toHaveBeenCalledWith(client, command, undefined);
+		expect(write).toHaveBeenCalledWith(client, expect.objectContaining({ command: command.type, success: true }));
+	});
+
 	it("creates a prompt target for a Discord capability without extension UI", () => {
 		const activeSessionId = "active-1";
 		const client = gatewayClient(activeSessionId, ["discord_gateway_read"]);

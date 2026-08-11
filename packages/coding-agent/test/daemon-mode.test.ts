@@ -4155,6 +4155,56 @@ describe("daemon mode helpers", () => {
 		await expect(pending).resolves.toEqual({ ok: false, code: "FORBIDDEN", message: "forbidden" });
 	});
 
+	it("accepts a Discord thread response received over the worker socket", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const state = makeState("active");
+		const client = makeClient("supervisor", state.activeSessionId);
+		const write = vi.fn<(data: string) => boolean>(() => true);
+		client.socket = { destroyed: false, write } as unknown as Socket;
+		state.clients.add(client);
+		setDaemonClientSessionCapabilities(client, state.activeSessionId, new Set(["discord_gateway_thread_creation"]));
+		state.discordGatewayExecutionOwner = {
+			client,
+			supportsExtensionUi: false,
+			supportsDiscordGatewayThreadCreation: true,
+		};
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			requestDiscordGatewayThreadCreation(
+				state: ActiveSessionState,
+				request: { title: string },
+			): Promise<{ ok: boolean }>;
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const pending = internals.requestDiscordGatewayThreadCreation(state, { title: "Planning" });
+		const [requestId] = [...(state.discordGatewayThreadCreationRequests ?? new Map())][0] ?? [];
+
+		await internals.handleLine(
+			client,
+			JSON.stringify({
+				id: "response-1",
+				type: "discord_gateway_thread_creation_response",
+				activeSessionId: state.activeSessionId,
+				requestId,
+				response: { ok: false, code: "UNAVAILABLE", message: "cancelled" },
+			}),
+		);
+
+		await expect(pending).resolves.toEqual({ ok: false, code: "UNAVAILABLE", message: "cancelled" });
+		expect(JSON.parse(write.mock.calls[1]![0])).toMatchObject({
+			type: "response",
+			id: "response-1",
+			command: "discord_gateway_thread_creation_response",
+			success: true,
+		});
+	});
+
 	it("delivers session closure while a client is snapshotting and backpressured", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

@@ -241,6 +241,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_tool_definition",
 	"set_session_entry_label",
 	"extension_ui_response",
+	"discord_gateway_read_response",
+	"discord_gateway_thread_creation_response",
 	"prepare_update_restart",
 	"retry_worker",
 	"restart",
