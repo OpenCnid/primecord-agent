@@ -21,6 +21,10 @@ export interface DiscordBridgeConfig {
 	groupSessionsPerUser: boolean;
 	historyBackfill: boolean;
 	historyBackfillLimit: number;
+	readMaxMessages: number;
+	readMaxContentChars: number;
+	readMaxTotalContentChars: number;
+	readMaxAttachments: number;
 	maxAttachmentBytes: number;
 	maxAttachments: number;
 	maxOutboundAttachmentBytes: number;
@@ -43,6 +47,14 @@ export type DiscordEnvironment = Readonly<Record<string, string | undefined>>;
 
 const BOT_MESSAGE_MODES = ["none", "mentions", "all"] as const;
 const REDACTED_TOKEN = "[REDACTED]" as const;
+export const DEFAULT_DISCORD_READ_MAX_MESSAGES = 50;
+export const DEFAULT_DISCORD_READ_MAX_CONTENT_CHARS = 4_000;
+export const DEFAULT_DISCORD_READ_MAX_TOTAL_CONTENT_CHARS = 12_000;
+export const DEFAULT_DISCORD_READ_MAX_ATTACHMENTS = 10;
+const MAX_DISCORD_READ_MESSAGES = 100;
+const MAX_DISCORD_READ_CONTENT_CHARS = 10_000;
+const MAX_DISCORD_READ_TOTAL_CONTENT_CHARS = 50_000;
+const MAX_DISCORD_READ_ATTACHMENTS = 25;
 
 function readRequired(env: DiscordEnvironment, name: string): string {
 	const value = env[name]?.trim();
@@ -78,6 +90,17 @@ function readNonNegativeInteger(env: DiscordEnvironment, name: string, defaultVa
 function readPositiveInteger(env: DiscordEnvironment, name: string, defaultValue: number): number {
 	const parsed = readNonNegativeInteger(env, name, defaultValue);
 	if (parsed === 0) throw new Error(`${name} must be a positive integer`);
+	return parsed;
+}
+
+function readBoundedPositiveInteger(
+	env: DiscordEnvironment,
+	name: string,
+	defaultValue: number,
+	maximum: number,
+): number {
+	const parsed = readPositiveInteger(env, name, defaultValue);
+	if (parsed > maximum) throw new Error(`${name} must not exceed ${maximum}`);
 	return parsed;
 }
 
@@ -132,6 +155,30 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		groupSessionsPerUser: readBoolean(env, "PRIME_DISCORD_GROUP_SESSIONS_PER_USER", true),
 		historyBackfill: readBoolean(env, "PRIME_DISCORD_HISTORY_BACKFILL", true),
 		historyBackfillLimit: readNonNegativeInteger(env, "PRIME_DISCORD_HISTORY_BACKFILL_LIMIT", 50),
+		readMaxMessages: readBoundedPositiveInteger(
+			env,
+			"PRIME_DISCORD_READ_MAX_MESSAGES",
+			DEFAULT_DISCORD_READ_MAX_MESSAGES,
+			MAX_DISCORD_READ_MESSAGES,
+		),
+		readMaxContentChars: readBoundedPositiveInteger(
+			env,
+			"PRIME_DISCORD_READ_MAX_CONTENT_CHARS",
+			DEFAULT_DISCORD_READ_MAX_CONTENT_CHARS,
+			MAX_DISCORD_READ_CONTENT_CHARS,
+		),
+		readMaxTotalContentChars: readBoundedPositiveInteger(
+			env,
+			"PRIME_DISCORD_READ_MAX_TOTAL_CONTENT_CHARS",
+			DEFAULT_DISCORD_READ_MAX_TOTAL_CONTENT_CHARS,
+			MAX_DISCORD_READ_TOTAL_CONTENT_CHARS,
+		),
+		readMaxAttachments: readBoundedPositiveInteger(
+			env,
+			"PRIME_DISCORD_READ_MAX_ATTACHMENTS",
+			DEFAULT_DISCORD_READ_MAX_ATTACHMENTS,
+			MAX_DISCORD_READ_ATTACHMENTS,
+		),
 		maxAttachmentBytes: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_ATTACHMENT_BYTES", 32 * 1024 * 1024),
 		maxAttachments: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_ATTACHMENTS", 5),
 		maxOutboundAttachmentBytes: readNonNegativeInteger(

@@ -8948,7 +8948,7 @@ export class AgentSession {
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
-			customTools: [...this._customTools],
+			customTools: this._customTools.filter((tool) => tool.propagateToSubagents !== false),
 			includeGoals: this._includeGoals,
 			includeCompactSkill: this._includeCompactSkill,
 			rlmDepth: this._rlmDepth + 1,

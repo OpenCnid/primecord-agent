@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
+import type { DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
 import type { AgentStatus } from "../../core/session-manager.js";
 import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
@@ -38,6 +39,7 @@ export interface ActiveSessionState {
 	/** Attach snapshots in flight: reserved for passivation busyness, but not yet event recipients. */
 	pendingAttaches: number;
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
+	discordGatewayReadRequests?: Map<string, ActiveSessionDiscordGatewayReadRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
 	unsubscribe?: () => void;
@@ -55,6 +57,11 @@ export interface ActiveSessionState {
 
 export interface ActiveSessionExtensionUiRequest {
 	resolve: (response: DaemonExtensionUIResponse) => void;
+}
+
+export interface ActiveSessionDiscordGatewayReadRequest {
+	ownerClientId: string;
+	resolve: (response: DiscordGatewayReadResponse) => void;
 }
 
 interface ActiveSessionIdIndex {

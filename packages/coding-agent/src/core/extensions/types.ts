@@ -433,6 +433,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	promptSnippet?: string;
 	/** Optional guideline bullets appended to the default system prompt when this tool is active. */
 	promptGuidelines?: string[];
+	/** When false, an RLM child does not inherit this tool from its parent session. */
+	propagateToSubagents?: boolean;
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */

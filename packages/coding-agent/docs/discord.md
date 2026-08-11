@@ -61,6 +61,10 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_GROUP_SESSIONS_PER_USER` | `true` | Isolate users in shared channels. Set `false` only when a shared transcript is intentional. |
 | `PRIME_DISCORD_HISTORY_BACKFILL` | `true` | Include recent pre-mention channel messages as bounded prompt context. |
 | `PRIME_DISCORD_HISTORY_BACKFILL_LIMIT` | `50` | Maximum recent messages inspected for initial context; `0` disables it. |
+| `PRIME_DISCORD_READ_MAX_MESSAGES` | `50` | Maximum messages returned by one `discord_read` history request; capped at 100. |
+| `PRIME_DISCORD_READ_MAX_CONTENT_CHARS` | `4000` | Maximum normalized content characters from one message; capped at 10000. |
+| `PRIME_DISCORD_READ_MAX_TOTAL_CONTENT_CHARS` | `12000` | Maximum normalized content characters across one history result; capped at 50000. |
+| `PRIME_DISCORD_READ_MAX_ATTACHMENTS` | `10` | Maximum attachment metadata entries returned from one message; capped at 25. |
 | `PRIME_DISCORD_MAX_ATTACHMENT_BYTES` | `33554432` | Per-file download limit; `0` means unlimited. |
 | `PRIME_DISCORD_MAX_ATTACHMENTS` | `5` | Maximum files on one message; `0` disables attachments. |
 | `PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENT_BYTES` | `26214400` | Per-file `MEDIA:` upload limit; `0` means unlimited. |
@@ -85,6 +89,19 @@ When both identity and channel allowlists are configured, both checks must pass.
 - `/new` replaces only the current Discord session mapping. `/abort` aborts that session and clears its queued Discord messages.
 
 Use `prime-agent shutdown` only when you intend to stop the resident Prime workers too.
+
+## Permission-scoped Discord reads
+
+Discord-created agent turns expose a `discord_read` tool. It is a gateway capability, not a bot token or a general Discord REST client. It can inspect one canonical message link or read one bounded recent-history page:
+
+- “Inspect `https://discord.com/channels/...`” lets the agent use `action: "message"` with that exact Discord message URL.
+- “Read the last 20 messages in this thread” lets the agent use `action: "history", limit: 20` with the current channel or thread.
+
+Every tool call rechecks the initiating user, current guild, channel policy, thread parent policy, and the user's view permission before Discord message data is fetched. A DM can read only its current DM. A server request can read its current channel or thread; another channel must be in the same guild and have its **parent channel** explicitly listed in `PRIME_DISCORD_ALLOWED_CHANNELS`. Ignored parents always win, and a direct thread allowlist entry never bypasses its parent policy. With no channel allowlist, cross-channel reads are disabled even for otherwise authorized identities.
+
+The tool accepts only `https://discord.com/channels/<guild-or-@me>/<channel>/<message>` URLs with decimal Discord IDs. It rejects query strings, fragments, credentials, ports, malformed links, other guilds, deleted targets, missing permissions, and forbidden targets with stable user-facing errors. History has no cursor or pagination, so it cannot enumerate unrestricted server history.
+
+Returned data is normalized and marked untrusted: IDs, timestamp, basic author fields, truncated text, and bounded attachment metadata only. It never returns raw Discord objects, bot credentials, attachment URLs, embeds, or attachment bytes. The daemon asks the gateway only while an active Discord-originated turn owns the request; background jobs and RLM subagents cannot retain or reuse a caller scope. Existing response paths continue to disable Discord mentions.
 
 ## Commands
 
@@ -116,6 +133,15 @@ Responses are split at Discord's 2,000-character limit with Markdown fences bala
 Agent responses can upload workspace artifacts using Hermes-compatible `MEDIA:/path/to/file` tags. The tag is removed from the text and the file is uploaded natively; relative paths resolve from `PRIME_DISCORD_CWD`. For safety, resolved files must remain inside that fixed workspace, including after symlink resolution. Uploads use the outbound count and byte limits above; rejected tags leave the text response intact with a delivery notice.
 
 The bridge handles text, images, arbitrary inbound files, and agent-generated media uploads. Discord voice channels and proactive scheduled delivery are not currently bridged.
+
+## Hermes follow-up roadmap
+
+Planned parity work is deliberately separate from the scoped-read capability:
+
+- Channel prompts and native skill commands.
+- Interactive clarify UI and proactive home-channel delivery.
+- Forum support and reconnect recovery.
+- Voice remains explicitly out of scope.
 
 ## Shutdown and diagnostics
 

@@ -6,16 +6,19 @@ import {
 	GatewayIntentBits,
 	type Guild,
 	type GuildMember,
+	type GuildTextBasedChannel,
 	type Interaction,
 	type Message,
 	MessageType,
 	type NewsChannel,
 	Partials,
+	PermissionFlagsBits,
 	type SendableChannels,
 	SlashCommandBuilder,
 	type TextChannel,
 	ThreadAutoArchiveDuration,
 } from "discord.js";
+import { type DiscordGatewayReadResponse, discordGatewayReadFailure } from "../../core/discord-gateway-read.js";
 import type {
 	AgentConnection,
 	AgentConnectionEvent,
@@ -42,6 +45,13 @@ import {
 	presentDiscordExtensionUi,
 } from "./extension-ui.js";
 import { type DiscordOutboundMedia, extractDiscordMedia, loadDiscordOutboundMedia } from "./outbound-media.js";
+import {
+	DiscordReadAdapterError,
+	type DiscordReadChannel,
+	type DiscordReadMessageSource,
+	type DiscordReadScope,
+	DiscordReadService,
+} from "./read.js";
 import {
 	createDiscordResponseWriter,
 	DISCORD_ALLOWED_MENTIONS,
@@ -145,6 +155,8 @@ export class DiscordBridge {
 	private readonly dispatchQueue = new DiscordDispatchQueue();
 	private readonly dedupe = new DiscordMessageDedupe();
 	private readonly activeExtensionUiOwners = new Map<string, ActiveExtensionUiOwner>();
+	private readonly activeDiscordReadScopes = new Map<AgentConnection, DiscordReadScope>();
+	private readonly discordReadService: DiscordReadService;
 	private readonly pendingExtensionDialogs = new Map<string, PendingExtensionDialog>();
 	private readonly extensionUiMessages = new Map<string, Message>();
 	private readonly roleLookups = new Map<
@@ -169,11 +181,23 @@ export class DiscordBridge {
 		this.logger = options.logger ?? console;
 		this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 		this.client = options.client ?? new Client(discordClientOptions(config));
+		this.discordReadService = new DiscordReadService(
+			{ getChannel: (channelId) => this.getDiscordReadChannel(channelId) },
+			config,
+			{
+				maxMessages: config.readMaxMessages,
+				maxContentChars: config.readMaxContentChars,
+				maxTotalContentChars: config.readMaxTotalContentChars,
+				maxAttachments: config.readMaxAttachments,
+			},
+			(userId, guildId) => this.resolveAuthorRoleIds(userId, null, guildId ?? null),
+		);
 		this.registry = new DiscordAgentRegistry({
 			cwd: config.cwd,
 			agentDir: options.agentDir,
 			sessionRoot: config.sessionDir,
 			socketPath: options.socketPath,
+			runtimeConfig: { discordGatewayRead: true },
 			connectionFactory: options.connectionFactory,
 			eventListener: this.onRegistryConnectionEvent,
 		});
@@ -249,6 +273,12 @@ export class DiscordBridge {
 			);
 			return;
 		}
+		if (event.type === "discord_gateway_read_request") {
+			void this.handleDiscordGatewayReadRequest(connection, event.request).catch((error: unknown) => {
+				this.logger.warn(`Discord gateway read failed: ${safeErrorMessage(error, this.config.botToken)}`);
+			});
+			return;
+		}
 		if (event.type !== "extension_ui_request") return;
 		const owner = this.activeExtensionUiOwners.get(key);
 		if (!owner || owner.connection !== connection) return;
@@ -258,6 +288,37 @@ export class DiscordBridge {
 			},
 		);
 	};
+
+	private async handleDiscordGatewayReadRequest(
+		connection: AgentConnection,
+		request: Extract<AgentConnectionEvent, { type: "discord_gateway_read_request" }>["request"],
+	): Promise<void> {
+		const respond = connection.respondToDiscordGatewayReadRequest;
+		if (!respond) return;
+		const scope = this.activeDiscordReadScopes.get(connection);
+		const response: DiscordGatewayReadResponse = scope
+			? await this.discordReadService.read(scope, request.request)
+			: discordGatewayReadFailure(
+					"UNAVAILABLE",
+					"Discord gateway read is unavailable outside an active Discord request.",
+				);
+		await respond.call(connection, request.id, response);
+	}
+
+	private async withDiscordReadScope<T>(
+		connection: AgentConnection,
+		scope: DiscordReadScope,
+		run: () => Promise<T>,
+	): Promise<T> {
+		this.activeDiscordReadScopes.set(connection, scope);
+		try {
+			return await run();
+		} finally {
+			if (this.activeDiscordReadScopes.get(connection) === scope) {
+				this.activeDiscordReadScopes.delete(connection);
+			}
+		}
+	}
 
 	private readonly onInvalidated = (): void => {
 		this.fatalError = new Error("Discord gateway session was invalidated and cannot reconnect");
@@ -386,10 +447,13 @@ export class DiscordBridge {
 				? [invocation.prompt, ...attachments.promptNotes].join("\n\n")
 				: await this.buildPrompt(message, botUser.id, decision, attachments.promptNotes);
 			const promptImages = attachments.images;
-			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, async () => {
-				await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
-				if (invocation?.command.source === "extension") await connection.waitForIdle();
-			});
+			const readScope = createDiscordReadScope(message.author.id, message.guildId, targetChannel);
+			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, () =>
+				this.withDiscordReadScope(connection, readScope, async () => {
+					await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
+					if (invocation?.command.source === "extension") await connection.waitForIdle();
+				}),
+			);
 			const finalText =
 				streamedText ||
 				(invocation?.command.source === "extension"
@@ -619,10 +683,13 @@ export class DiscordBridge {
 						if (delta) streamedText += delta;
 					});
 					try {
-						await this.withExtensionUiOwner(key, interaction.user.id, channel, connection, async () => {
-							await connection.promptAndWait(invocation.prompt, { source: "rpc" });
-							if (invocation.command.source === "extension") await connection.waitForIdle();
-						});
+						const readScope = createDiscordReadScope(interaction.user.id, interaction.guildId, channel);
+						await this.withExtensionUiOwner(key, interaction.user.id, channel, connection, () =>
+							this.withDiscordReadScope(connection, readScope, async () => {
+								await connection.promptAndWait(invocation.prompt, { source: "rpc" });
+								if (invocation.command.source === "extension") await connection.waitForIdle();
+							}),
+						);
 						const text =
 							streamedText ||
 							(invocation.command.source === "extension"
@@ -1007,9 +1074,75 @@ export class DiscordBridge {
 		return undefined;
 	}
 
+	private async getDiscordReadChannel(channelId: string): Promise<DiscordReadChannel | undefined> {
+		let channel: Awaited<ReturnType<Client["channels"]["fetch"]>>;
+		try {
+			channel = await this.client.channels.fetch(channelId);
+		} catch (error) {
+			throw discordReadAdapterError(error, "channel");
+		}
+		if (!channel || !channel.isTextBased()) return undefined;
+		if (channel.isDMBased()) {
+			return {
+				id: channel.id,
+				kind: "dm",
+				getMessage: async (messageId) => {
+					try {
+						const message = await channel.messages.fetch(messageId);
+						return message ? discordReadMessageSource(message) : undefined;
+					} catch (error) {
+						throw discordReadAdapterError(error, "message");
+					}
+				},
+				getRecentMessages: async (limit) => {
+					try {
+						const messages = await channel.messages.fetch({ limit });
+						return [...messages.values()].map(discordReadMessageSource);
+					} catch (error) {
+						throw discordReadAdapterError(error, "channel");
+					}
+				},
+			};
+		}
+		if (!isDiscordReadGuildChannel(channel)) return undefined;
+		if (!channel.viewable) {
+			throw new DiscordReadAdapterError("MISSING_PERMISSION", "Discord denied channel access.");
+		}
+		return {
+			id: channel.id,
+			kind: channel.isThread() ? "thread" : "guild",
+			guildId: channel.guildId,
+			...(channel.isThread() && channel.parentId ? { parentChannelId: channel.parentId } : {}),
+			canUserView: (userId) => this.canDiscordReadUserView(channel, userId),
+			getMessage: async (messageId) => {
+				try {
+					const message = await channel.messages.fetch(messageId);
+					return message ? discordReadMessageSource(message) : undefined;
+				} catch (error) {
+					throw discordReadAdapterError(error, "message");
+				}
+			},
+			getRecentMessages: async (limit) => {
+				try {
+					const messages = await channel.messages.fetch({ limit });
+					return [...messages.values()].map(discordReadMessageSource);
+				} catch (error) {
+					throw discordReadAdapterError(error, "channel");
+				}
+			},
+		};
+	}
+
+	private async canDiscordReadUserView(channel: GuildTextBasedChannel, userId: string): Promise<boolean> {
+		const member =
+			channel.guild.members.cache.get(userId) ?? (await channel.guild.members.fetch(userId).catch(() => undefined));
+		return member ? (channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel) ?? false) : false;
+	}
+
 	private async stopInternal(): Promise<void> {
 		try {
 			this.accepting = false;
+			this.activeDiscordReadScopes.clear();
 			await Promise.allSettled(
 				[...this.pendingExtensionDialogs.keys()].map((key) => this.cancelPendingExtensionDialog(key)),
 			);
@@ -1075,6 +1208,18 @@ function createDiscordMessageSessionKey(
 	);
 }
 
+function createDiscordReadScope(userId: string, guildId: string | null, channel: SendableChannels): DiscordReadScope {
+	if (!guildId) {
+		return { userId, kind: "dm", channelId: channel.id };
+	}
+	return {
+		userId,
+		kind: channel.isThread() ? "thread" : "guild",
+		guildId,
+		channelId: channel.id,
+	};
+}
+
 function messageRouteInput(
 	message: Message,
 	botUserId: string,
@@ -1123,6 +1268,45 @@ function interactionRoleIds(
 	const roles = member.roles;
 	if (Array.isArray(roles)) return roles;
 	return [...(member as GuildMember).roles.cache.keys()];
+}
+
+function isDiscordReadGuildChannel(
+	channel: Exclude<Awaited<ReturnType<Client["channels"]["fetch"]>>, null>,
+): channel is GuildTextBasedChannel {
+	return channel.isTextBased() && !channel.isDMBased() && "guildId" in channel;
+}
+
+function discordReadMessageSource(message: Message): DiscordReadMessageSource {
+	return {
+		id: message.id,
+		channelId: message.channelId,
+		...(message.guildId ? { guildId: message.guildId } : {}),
+		createdTimestamp: message.createdTimestamp,
+		author: {
+			id: message.author.id,
+			username: message.author.username,
+			...(message.member?.displayName ? { displayName: message.member.displayName } : {}),
+		},
+		content: message.content,
+		attachments: message.attachments.map((attachment) => ({
+			id: attachment.id,
+			name: attachment.name ?? "attachment",
+			...(attachment.contentType ? { contentType: attachment.contentType } : {}),
+			size: attachment.size,
+		})),
+	};
+}
+
+function discordReadAdapterError(error: unknown, target: "channel" | "message"): DiscordReadAdapterError {
+	const code =
+		error && typeof error === "object" && "code" in error && typeof error.code === "number" ? error.code : undefined;
+	if (code === 50_001 || code === 50_013) {
+		return new DiscordReadAdapterError("MISSING_PERMISSION", "Discord denied message access.");
+	}
+	if (target === "message" && code === 10_008) {
+		return new DiscordReadAdapterError("UNAVAILABLE", "The requested Discord message is unavailable or was deleted.");
+	}
+	return new DiscordReadAdapterError("UNAVAILABLE", "Discord data is unavailable.");
 }
 
 function attachmentDescriptors(message: Message): DiscordAttachmentDescriptor[] {

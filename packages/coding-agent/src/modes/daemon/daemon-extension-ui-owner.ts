@@ -4,6 +4,7 @@ import type { DaemonSocketClient } from "./active-session-state.js";
 export interface DaemonExtensionUiExecutionOwner {
 	client: DaemonSocketClient;
 	supportsExtensionUi: boolean;
+	supportsDiscordGatewayRead?: boolean;
 	targetClientId?: string;
 }
 

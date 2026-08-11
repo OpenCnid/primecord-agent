@@ -9,6 +9,7 @@ import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
+import type { DiscordGatewayReadController } from "./discord-gateway-read.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
@@ -90,6 +91,8 @@ export interface AgentSessionCreationOptions {
 	telemetryDisabled?: true;
 	/** Initial goal to seed at session creation (rlmDepth 0 only, idempotent). */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Gateway-owned broker used only by a Discord-created session. */
+	discordGatewayReadController?: DiscordGatewayReadController;
 }
 
 /**

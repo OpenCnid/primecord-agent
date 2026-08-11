@@ -352,6 +352,7 @@ class FakeDaemonClient {
 			case "set_scoped_models":
 			case "rename_saved_session":
 			case "extension_ui_response":
+			case "discord_gateway_read_response":
 			case "detach":
 				return { type: "response", command: command.type, success: true };
 			case "cancel_rlm_child":
@@ -2607,6 +2608,53 @@ describe("DaemonAgentConnection", () => {
 			activeSessionId: "active-1",
 			requestId: "request-1",
 			response: { confirmed: true },
+		});
+	});
+
+	it("forwards capability-gated Discord gateway read requests only for the active session", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			supportsDiscordGatewayRead: true,
+		});
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			events.push(event);
+		});
+		await connection.attach();
+		expect(fakeClient.requests[0]).toMatchObject({
+			type: "attach",
+			capabilities: expect.arrayContaining(["discord_gateway_read"]),
+		});
+
+		fakeClient.emitMessage({
+			type: "discord_gateway_read_request",
+			activeSessionId: "active-1",
+			id: "discord-read-1",
+			request: { action: "history", limit: 20 },
+		});
+		fakeClient.emitMessage({
+			type: "discord_gateway_read_request",
+			activeSessionId: "other",
+			id: "discord-read-2",
+			request: { action: "history", limit: 20 },
+		});
+		expect(events).toEqual([
+			{
+				type: "discord_gateway_read_request",
+				request: { id: "discord-read-1", request: { action: "history", limit: 20 } },
+			},
+		]);
+
+		await connection.respondToDiscordGatewayReadRequest("discord-read-1", {
+			ok: false,
+			code: "FORBIDDEN",
+			message: "This Discord channel is forbidden by gateway policy.",
+		});
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "discord_gateway_read_response",
+			activeSessionId: "active-1",
+			requestId: "discord-read-1",
+			response: { ok: false, code: "FORBIDDEN" },
 		});
 	});
 

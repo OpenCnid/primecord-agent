@@ -72,6 +72,7 @@ import { SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
+import { createDiscordGatewayReadTool } from "./core/tools/discord-gateway-read.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
 import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
@@ -767,7 +768,7 @@ async function prepareRuntimeServices(options: {
 	const scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
 	const {
-		options: sessionOptions,
+		options: builtSessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
 	} = buildSessionOptions(
@@ -777,6 +778,17 @@ async function prepareRuntimeServices(options: {
 		modelRegistry,
 		settingsManager,
 	);
+	const discordGatewayReadController = options.sessionOptionsOverride?.discordGatewayReadController;
+	const sessionOptions =
+		config.discordGatewayRead && discordGatewayReadController
+			? {
+					...builtSessionOptions,
+					customTools: [
+						...(builtSessionOptions.customTools ?? []),
+						createDiscordGatewayReadTool(discordGatewayReadController),
+					],
+				}
+			: builtSessionOptions;
 	diagnostics.push(...sessionOptionDiagnostics);
 
 	const effectiveSessionModel = options.sessionOptionsOverride?.model ?? sessionOptions.model;
