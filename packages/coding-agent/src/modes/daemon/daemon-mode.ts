@@ -154,6 +154,7 @@ import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
 	currentDaemonExtensionUiExecutionOwner,
+	type DaemonExtensionUiExecutionOwner,
 	withDaemonExtensionUiExecutionOwner,
 } from "./daemon-extension-ui-owner.js";
 import {
@@ -3837,13 +3838,15 @@ export class AgentDaemon {
 				};
 				if (command.type === "prompt_and_wait") {
 					try {
-						await withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
-							this.promptWithAgentMessagePreparingGuard(state, command.message, {
-								...options,
-								preflightResult: (didSucceed) => {
-									if (didSucceed) this.recordWorkerRecoveryState(state, "prompt_accepted", true);
-								},
-							}),
+						await this.withDiscordGatewayExecutionOwner(state, extensionUiOwner, () =>
+							withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
+								this.promptWithAgentMessagePreparingGuard(state, command.message, {
+									...options,
+									preflightResult: (didSucceed) => {
+										if (didSucceed) this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+									},
+								}),
+							),
 						);
 						return success(command.id, command.type);
 					} finally {
@@ -3858,25 +3861,27 @@ export class AgentDaemon {
 					responseSent = true;
 					this.write(client, success(command.id, "prompt"));
 				};
-				void withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
-					this.promptWithAgentMessagePreparingGuard(
-						state,
-						command.message,
-						{
-							...options,
-							agentMessageId: command.agentMessageId,
-							customMessage: command.customMessage,
-							preflightResult: (didSucceed) => {
-								if (didSucceed) {
-									this.recordWorkerRecoveryState(state, "prompt_accepted", true);
-									sendSuccessResponse();
-								} else {
-									preflightRejected = true;
-								}
+				void this.withDiscordGatewayExecutionOwner(state, extensionUiOwner, () =>
+					withDaemonExtensionUiExecutionOwner(extensionUiOwner, () =>
+						this.promptWithAgentMessagePreparingGuard(
+							state,
+							command.message,
+							{
+								...options,
+								agentMessageId: command.agentMessageId,
+								customMessage: command.customMessage,
+								preflightResult: (didSucceed) => {
+									if (didSucceed) {
+										this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+										sendSuccessResponse();
+									} else {
+										preflightRejected = true;
+									}
+								},
 							},
-						},
-						undefined,
-						false,
+							undefined,
+							false,
+						),
 					),
 				)
 					.then(() => {
@@ -6212,6 +6217,21 @@ export class AgentDaemon {
 		};
 	}
 
+	private async withDiscordGatewayExecutionOwner<T>(
+		state: ActiveSessionState,
+		owner: DaemonExtensionUiExecutionOwner,
+		run: () => Promise<T>,
+	): Promise<T> {
+		state.discordGatewayExecutionOwner = owner;
+		try {
+			return await run();
+		} finally {
+			if (state.discordGatewayExecutionOwner === owner) {
+				state.discordGatewayExecutionOwner = undefined;
+			}
+		}
+	}
+
 	private requestDiscordGatewayRead(
 		state: ActiveSessionState,
 		request: DiscordGatewayReadRequest,
@@ -6220,7 +6240,7 @@ export class AgentDaemon {
 		if (signal?.aborted) {
 			return Promise.resolve(discordGatewayReadFailure("UNAVAILABLE", "Discord gateway read was cancelled."));
 		}
-		const owner = currentDaemonExtensionUiExecutionOwner();
+		const owner = currentDaemonExtensionUiExecutionOwner() ?? state.discordGatewayExecutionOwner;
 		if (
 			!owner ||
 			!owner.supportsDiscordGatewayRead ||
@@ -6291,7 +6311,7 @@ export class AgentDaemon {
 				discordGatewayThreadCreationFailure("UNAVAILABLE", "Discord thread creation was cancelled."),
 			);
 		}
-		const owner = currentDaemonExtensionUiExecutionOwner();
+		const owner = currentDaemonExtensionUiExecutionOwner() ?? state.discordGatewayExecutionOwner;
 		if (
 			!owner ||
 			!owner.supportsDiscordGatewayThreadCreation ||
@@ -6331,7 +6351,7 @@ export class AgentDaemon {
 	}
 
 	private sendExtensionUiToExecutionOwner(state: ActiveSessionState, message: DaemonOutbound): void {
-		const owner = currentDaemonExtensionUiExecutionOwner();
+		const owner = currentDaemonExtensionUiExecutionOwner() ?? state.discordGatewayExecutionOwner;
 		if (owner) {
 			if (owner.supportsExtensionUi && state.clients.has(owner.client)) this.write(owner.client, message);
 			return;
