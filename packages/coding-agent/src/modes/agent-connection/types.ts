@@ -13,6 +13,10 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { DiscordGatewayReadRequest, DiscordGatewayReadResponse } from "../../core/discord-gateway-read.js";
+import type {
+	DiscordGatewayThreadCreationRequest,
+	DiscordGatewayThreadCreationResponse,
+} from "../../core/discord-gateway-thread.js";
 import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { GoalState } from "../../core/goals.js";
@@ -533,6 +537,11 @@ export interface AgentConnectionDiscordGatewayReadRequest {
 	request: DiscordGatewayReadRequest;
 }
 
+export interface AgentConnectionDiscordGatewayThreadCreationRequest {
+	id: string;
+	request: DiscordGatewayThreadCreationRequest;
+}
+
 export type AgentConnectionRlmChildAgentStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
 export interface AgentConnectionRlmChildAgentActivity {
@@ -621,6 +630,7 @@ export type AgentConnectionEvent =
 	| { type: "session_status"; recap?: string }
 	| { type: "extension_ui_request"; request: AgentConnectionExtensionUiRequest }
 	| { type: "discord_gateway_read_request"; request: AgentConnectionDiscordGatewayReadRequest }
+	| { type: "discord_gateway_thread_creation_request"; request: AgentConnectionDiscordGatewayThreadCreationRequest }
 	| { type: "extension_error"; extensionPath: string; event: string; error: string }
 	| { type: "connection_status"; status: "reconnecting" | "connected"; error?: string }
 	| { type: "heartbeats_changed" }
@@ -681,6 +691,10 @@ export interface AgentConnection {
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
 	respondToDiscordGatewayReadRequest?(requestId: string, response: DiscordGatewayReadResponse): Promise<void>;
+	respondToDiscordGatewayThreadCreationRequest?(
+		requestId: string,
+		response: DiscordGatewayThreadCreationResponse,
+	): Promise<void>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;

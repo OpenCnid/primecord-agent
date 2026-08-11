@@ -19,6 +19,10 @@ import {
 	ThreadAutoArchiveDuration,
 } from "discord.js";
 import { type DiscordGatewayReadResponse, discordGatewayReadFailure } from "../../core/discord-gateway-read.js";
+import {
+	type DiscordGatewayThreadCreationResponse,
+	discordGatewayThreadCreationFailure,
+} from "../../core/discord-gateway-thread.js";
 import type {
 	AgentConnection,
 	AgentConnectionEvent,
@@ -67,6 +71,12 @@ import {
 	stripBotMention,
 } from "./routing.js";
 import { createDiscordSessionKey } from "./session-key.js";
+import {
+	DiscordThreadCreationAdapterError,
+	type DiscordThreadCreationParentChannel,
+	type DiscordThreadCreationScope,
+	DiscordThreadCreationService,
+} from "./thread.js";
 
 export interface DiscordBridgeOptions {
 	agentDir: string;
@@ -156,7 +166,9 @@ export class DiscordBridge {
 	private readonly dedupe = new DiscordMessageDedupe();
 	private readonly activeExtensionUiOwners = new Map<string, ActiveExtensionUiOwner>();
 	private readonly activeDiscordReadScopes = new Map<AgentConnection, DiscordReadScope>();
+	private readonly activeDiscordThreadCreationScopes = new Map<AgentConnection, DiscordThreadCreationScope>();
 	private readonly discordReadService: DiscordReadService;
+	private readonly discordThreadCreationService: DiscordThreadCreationService;
 	private readonly pendingExtensionDialogs = new Map<string, PendingExtensionDialog>();
 	private readonly extensionUiMessages = new Map<string, Message>();
 	private readonly roleLookups = new Map<
@@ -192,12 +204,17 @@ export class DiscordBridge {
 			},
 			(userId, guildId) => this.resolveAuthorRoleIds(userId, null, guildId ?? null),
 		);
+		this.discordThreadCreationService = new DiscordThreadCreationService(
+			{ getChannel: (channelId) => this.getDiscordThreadCreationChannel(channelId) },
+			config,
+			(userId, guildId) => this.resolveAuthorRoleIds(userId, null, guildId ?? null),
+		);
 		this.registry = new DiscordAgentRegistry({
 			cwd: config.cwd,
 			agentDir: options.agentDir,
 			sessionRoot: config.sessionDir,
 			socketPath: options.socketPath,
-			runtimeConfig: { discordGatewayRead: true },
+			runtimeConfig: { discordGatewayRead: true, discordGatewayThreadCreation: true },
 			connectionFactory: options.connectionFactory,
 			eventListener: this.onRegistryConnectionEvent,
 		});
@@ -279,6 +296,14 @@ export class DiscordBridge {
 			});
 			return;
 		}
+		if (event.type === "discord_gateway_thread_creation_request") {
+			void this.handleDiscordGatewayThreadCreationRequest(connection, event.request).catch((error: unknown) => {
+				this.logger.warn(
+					`Discord gateway thread creation failed: ${safeErrorMessage(error, this.config.botToken)}`,
+				);
+			});
+			return;
+		}
 		if (event.type !== "extension_ui_request") return;
 		const owner = this.activeExtensionUiOwners.get(key);
 		if (!owner || owner.connection !== connection) return;
@@ -316,6 +341,37 @@ export class DiscordBridge {
 		} finally {
 			if (this.activeDiscordReadScopes.get(connection) === scope) {
 				this.activeDiscordReadScopes.delete(connection);
+			}
+		}
+	}
+
+	private async handleDiscordGatewayThreadCreationRequest(
+		connection: AgentConnection,
+		request: Extract<AgentConnectionEvent, { type: "discord_gateway_thread_creation_request" }>["request"],
+	): Promise<void> {
+		const respond = connection.respondToDiscordGatewayThreadCreationRequest;
+		if (!respond) return;
+		const scope = this.activeDiscordThreadCreationScopes.get(connection);
+		const response: DiscordGatewayThreadCreationResponse = scope
+			? await this.discordThreadCreationService.create(scope, request.request)
+			: discordGatewayThreadCreationFailure(
+					"UNAVAILABLE",
+					"Discord thread creation is unavailable outside an active Discord request.",
+				);
+		await respond.call(connection, request.id, response);
+	}
+
+	private async withDiscordThreadCreationScope<T>(
+		connection: AgentConnection,
+		scope: DiscordThreadCreationScope,
+		run: () => Promise<T>,
+	): Promise<T> {
+		this.activeDiscordThreadCreationScopes.set(connection, scope);
+		try {
+			return await run();
+		} finally {
+			if (this.activeDiscordThreadCreationScopes.get(connection) === scope) {
+				this.activeDiscordThreadCreationScopes.delete(connection);
 			}
 		}
 	}
@@ -448,11 +504,18 @@ export class DiscordBridge {
 				: await this.buildPrompt(message, botUser.id, decision, attachments.promptNotes);
 			const promptImages = attachments.images;
 			const readScope = createDiscordReadScope(message.author.id, message.guildId, targetChannel);
+			const threadCreationScope = createDiscordThreadCreationScope(
+				message.author.id,
+				message.guildId,
+				targetChannel,
+			);
 			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, () =>
-				this.withDiscordReadScope(connection, readScope, async () => {
-					await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
-					if (invocation?.command.source === "extension") await connection.waitForIdle();
-				}),
+				this.withDiscordReadScope(connection, readScope, () =>
+					this.withDiscordThreadCreationScope(connection, threadCreationScope, async () => {
+						await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
+						if (invocation?.command.source === "extension") await connection.waitForIdle();
+					}),
+				),
 			);
 			const finalText =
 				streamedText ||
@@ -684,11 +747,18 @@ export class DiscordBridge {
 					});
 					try {
 						const readScope = createDiscordReadScope(interaction.user.id, interaction.guildId, channel);
+						const threadCreationScope = createDiscordThreadCreationScope(
+							interaction.user.id,
+							interaction.guildId,
+							channel,
+						);
 						await this.withExtensionUiOwner(key, interaction.user.id, channel, connection, () =>
-							this.withDiscordReadScope(connection, readScope, async () => {
-								await connection.promptAndWait(invocation.prompt, { source: "rpc" });
-								if (invocation.command.source === "extension") await connection.waitForIdle();
-							}),
+							this.withDiscordReadScope(connection, readScope, () =>
+								this.withDiscordThreadCreationScope(connection, threadCreationScope, async () => {
+									await connection.promptAndWait(invocation.prompt, { source: "rpc" });
+									if (invocation.command.source === "extension") await connection.waitForIdle();
+								}),
+							),
 						);
 						const text =
 							streamedText ||
@@ -1133,16 +1203,73 @@ export class DiscordBridge {
 		};
 	}
 
+	private async getDiscordThreadCreationChannel(channelId: string) {
+		let channel: Awaited<ReturnType<Client["channels"]["fetch"]>>;
+		try {
+			channel = await this.client.channels.fetch(channelId);
+		} catch (error) {
+			throw discordThreadCreationAdapterError(error);
+		}
+		if (!channel) return undefined;
+		if (channel.isDMBased()) return { id: channel.id, kind: "dm" } as const;
+		if (!isDiscordReadGuildChannel(channel)) return undefined;
+		if (!channel.viewable) {
+			throw new DiscordThreadCreationAdapterError("MISSING_PERMISSION", "Discord denied channel access.");
+		}
+		if (channel.isThread()) {
+			return {
+				id: channel.id,
+				kind: "thread",
+				guildId: channel.guildId,
+				...(channel.parentId ? { parentChannelId: channel.parentId } : {}),
+			} as const;
+		}
+		if (!isDiscordThreadCreationParentChannel(channel)) {
+			return { id: channel.id, kind: "guild", guildId: channel.guildId } as const;
+		}
+		const parent: DiscordThreadCreationParentChannel = {
+			id: channel.id,
+			kind: "guild",
+			guildId: channel.guildId,
+			canUserCreateThread: (userId) => this.canDiscordUserCreateThread(channel, userId),
+			createThread: async (title) => {
+				try {
+					const thread = await channel.threads.create({
+						name: title,
+						autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
+						reason: "Prime Agent thread requested by the initiating Discord user",
+					});
+					return { id: thread.id };
+				} catch (error) {
+					throw discordThreadCreationAdapterError(error);
+				}
+			},
+		};
+		return parent;
+	}
+
 	private async canDiscordReadUserView(channel: GuildTextBasedChannel, userId: string): Promise<boolean> {
 		const member =
 			channel.guild.members.cache.get(userId) ?? (await channel.guild.members.fetch(userId).catch(() => undefined));
 		return member ? (channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel) ?? false) : false;
 	}
 
+	private async canDiscordUserCreateThread(channel: TextChannel | NewsChannel, userId: string): Promise<boolean> {
+		const member =
+			channel.guild.members.cache.get(userId) ?? (await channel.guild.members.fetch(userId).catch(() => undefined));
+		const permissions = member ? channel.permissionsFor(member) : undefined;
+		return Boolean(
+			permissions?.has(PermissionFlagsBits.ViewChannel) &&
+				permissions.has(PermissionFlagsBits.SendMessages) &&
+				permissions.has(PermissionFlagsBits.CreatePublicThreads),
+		);
+	}
+
 	private async stopInternal(): Promise<void> {
 		try {
 			this.accepting = false;
 			this.activeDiscordReadScopes.clear();
+			this.activeDiscordThreadCreationScopes.clear();
 			await Promise.allSettled(
 				[...this.pendingExtensionDialogs.keys()].map((key) => this.cancelPendingExtensionDialog(key)),
 			);
@@ -1191,6 +1318,12 @@ function isDiscordThreadParentChannel(
 	return Boolean(channel?.isTextBased() && !channel.isDMBased() && !channel.isThread() && !channel.isThreadOnly());
 }
 
+function isDiscordThreadCreationParentChannel(
+	channel: Exclude<Awaited<ReturnType<Client["channels"]["fetch"]>>, null>,
+): channel is TextChannel | NewsChannel {
+	return channel.isTextBased() && !channel.isDMBased() && !channel.isThread() && !channel.isThreadOnly();
+}
+
 function createDiscordMessageSessionKey(
 	message: Message,
 	channel: SendableChannels,
@@ -1209,6 +1342,22 @@ function createDiscordMessageSessionKey(
 }
 
 function createDiscordReadScope(userId: string, guildId: string | null, channel: SendableChannels): DiscordReadScope {
+	if (!guildId) {
+		return { userId, kind: "dm", channelId: channel.id };
+	}
+	return {
+		userId,
+		kind: channel.isThread() ? "thread" : "guild",
+		guildId,
+		channelId: channel.id,
+	};
+}
+
+function createDiscordThreadCreationScope(
+	userId: string,
+	guildId: string | null,
+	channel: SendableChannels,
+): DiscordThreadCreationScope {
 	if (!guildId) {
 		return { userId, kind: "dm", channelId: channel.id };
 	}
@@ -1307,6 +1456,15 @@ function discordReadAdapterError(error: unknown, target: "channel" | "message"):
 		return new DiscordReadAdapterError("UNAVAILABLE", "The requested Discord message is unavailable or was deleted.");
 	}
 	return new DiscordReadAdapterError("UNAVAILABLE", "Discord data is unavailable.");
+}
+
+function discordThreadCreationAdapterError(error: unknown): DiscordThreadCreationAdapterError {
+	const code =
+		error && typeof error === "object" && "code" in error && typeof error.code === "number" ? error.code : undefined;
+	if (code === 50_001 || code === 50_013) {
+		return new DiscordThreadCreationAdapterError("MISSING_PERMISSION", "Discord denied thread creation.");
+	}
+	return new DiscordThreadCreationAdapterError("UNAVAILABLE", "Discord thread creation is unavailable.");
 }
 
 function attachmentDescriptors(message: Message): DiscordAttachmentDescriptor[] {

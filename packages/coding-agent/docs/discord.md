@@ -103,6 +103,12 @@ The tool accepts only `https://discord.com/channels/<guild-or-@me>/<channel>/<me
 
 Returned data is normalized and marked untrusted: IDs, timestamp, basic author fields, truncated text, and bounded attachment metadata only. It never returns raw Discord objects, bot credentials, attachment URLs, embeds, or attachment bytes. The daemon asks the gateway only while an active Discord-originated turn owns the request; background jobs and RLM subagents cannot retain or reuse a caller scope. Existing response paths continue to disable Discord mentions.
 
+## Permission-scoped thread creation
+
+Discord-created agent turns also expose `discord_create_thread` when a user explicitly asks to create a thread in natural language. It accepts only a short title and can create one public thread in the current authorized server text or announcement channel. When invoked from an existing thread, it can create only a sibling under that thread's canonical parent. It cannot select another guild or channel, create nested threads, create threads from DMs, add members, or manage existing channels.
+
+Every call rechecks the initiating user's gateway policy, parent-channel policy, and Discord permissions to view the channel, send messages, and create public threads. The daemon never receives the bot token; it gets only a bounded request and normalized thread ID, name, and URL. Background jobs and RLM subagents cannot create threads through this capability.
+
 ## Commands
 
 The gateway registers these global slash commands:
@@ -138,7 +144,7 @@ The bridge handles text, images, arbitrary inbound files, and agent-generated me
 
 Planned parity work is deliberately separate from the scoped-read capability:
 
-- Channel prompts and native skill commands.
+- Native skill commands.
 - Interactive clarify UI and proactive home-channel delivery.
 - Forum support and reconnect recovery.
 - Voice remains explicitly out of scope.

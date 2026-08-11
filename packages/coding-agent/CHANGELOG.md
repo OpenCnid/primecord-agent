@@ -4,6 +4,7 @@
 
 - Added a secure Discord gateway with mention and thread routing, per-user persistent resident sessions, streaming responses, attachments, allowlists, and session-management slash commands.
 - Added permission-scoped Discord message-link and bounded-history reads for active Discord agent turns.
+- Added permission-scoped natural-language Discord thread creation for active agent turns.
 - Added `/thread` to create an isolated Prime Agent conversation thread from a Discord server channel.
 - Added Hermes-compatible `MEDIA:/path` output tags for safely uploading agent-generated workspace artifacts to Discord.
 - Added Discord access to discovered tools, context files, extensions, prompt templates, skills, themes, resource commands, and extension UI requests.

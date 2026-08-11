@@ -73,6 +73,7 @@ import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { createDiscordGatewayReadTool } from "./core/tools/discord-gateway-read.js";
+import { createDiscordGatewayThreadCreationTool } from "./core/tools/discord-gateway-thread.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
 import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
@@ -779,14 +780,21 @@ async function prepareRuntimeServices(options: {
 		settingsManager,
 	);
 	const discordGatewayReadController = options.sessionOptionsOverride?.discordGatewayReadController;
+	const discordGatewayThreadCreationController =
+		options.sessionOptionsOverride?.discordGatewayThreadCreationController;
+	const discordGatewayCustomTools = [
+		...(config.discordGatewayRead && discordGatewayReadController
+			? [createDiscordGatewayReadTool(discordGatewayReadController)]
+			: []),
+		...(config.discordGatewayThreadCreation && discordGatewayThreadCreationController
+			? [createDiscordGatewayThreadCreationTool(discordGatewayThreadCreationController)]
+			: []),
+	];
 	const sessionOptions =
-		config.discordGatewayRead && discordGatewayReadController
+		discordGatewayCustomTools.length > 0
 			? {
 					...builtSessionOptions,
-					customTools: [
-						...(builtSessionOptions.customTools ?? []),
-						createDiscordGatewayReadTool(discordGatewayReadController),
-					],
+					customTools: [...(builtSessionOptions.customTools ?? []), ...discordGatewayCustomTools],
 				}
 			: builtSessionOptions;
 	diagnostics.push(...sessionOptionDiagnostics);

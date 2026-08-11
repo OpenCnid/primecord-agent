@@ -41,6 +41,8 @@ export interface AgentSessionRuntimeConfig {
 	telemetryDisabled?: true;
 	/** Enables the Discord gateway's permission-scoped read tool for this daemon session. */
 	discordGatewayRead?: true;
+	/** Enables the Discord gateway's permission-scoped thread-creation tool for this daemon session. */
+	discordGatewayThreadCreation?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).
 	 * Ignored for subagent sessions and when the branch already has a persisted
@@ -88,6 +90,8 @@ export function mergeAgentSessionRuntimeConfig(
 		executionMode: override.executionMode ?? base.executionMode,
 		telemetryDisabled: base.telemetryDisabled || override.telemetryDisabled ? true : undefined,
 		discordGatewayRead: base.discordGatewayRead || override.discordGatewayRead ? true : undefined,
+		discordGatewayThreadCreation:
+			base.discordGatewayThreadCreation || override.discordGatewayThreadCreation ? true : undefined,
 		initialGoal: override.initialGoal ?? base.initialGoal,
 	};
 }
@@ -108,6 +112,7 @@ function cloneAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): Agen
 		executionMode: config.executionMode,
 		telemetryDisabled: config.telemetryDisabled,
 		discordGatewayRead: config.discordGatewayRead,
+		discordGatewayThreadCreation: config.discordGatewayThreadCreation,
 		initialGoal: config.initialGoal ? { ...config.initialGoal } : undefined,
 	};
 }

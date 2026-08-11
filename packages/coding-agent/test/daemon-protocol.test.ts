@@ -83,6 +83,21 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("discord_gateway_read");
 	});
 
+	it("capability-gates Discord gateway thread creation request and response routing", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(17);
+		expect(DAEMON_COMMAND_COMPATIBILITY.discord_gateway_thread_creation_response).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "discord_gateway_thread_creation",
+		});
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.discord_gateway_thread_creation_request).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "discord_gateway_thread_creation",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("discord_gateway_thread_creation");
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

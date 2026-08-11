@@ -10,6 +10,7 @@ import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import type { DiscordGatewayReadController } from "./discord-gateway-read.js";
+import type { DiscordGatewayThreadCreationController } from "./discord-gateway-thread.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
@@ -93,6 +94,8 @@ export interface AgentSessionCreationOptions {
 	initialGoal?: { objective: string; tokenBudget?: number };
 	/** Gateway-owned broker used only by a Discord-created session. */
 	discordGatewayReadController?: DiscordGatewayReadController;
+	/** Gateway-owned broker used only by a Discord-created session. */
+	discordGatewayThreadCreationController?: DiscordGatewayThreadCreationController;
 }
 
 /**
