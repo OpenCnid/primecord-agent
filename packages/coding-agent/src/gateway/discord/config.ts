@@ -23,6 +23,8 @@ export interface DiscordBridgeConfig {
 	historyBackfillLimit: number;
 	maxAttachmentBytes: number;
 	maxAttachments: number;
+	maxOutboundAttachmentBytes: number;
+	maxOutboundAttachments: number;
 	attachmentTimeoutMs: number;
 	streamUpdateIntervalMs: number;
 	registerCommands: boolean;
@@ -132,6 +134,12 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		historyBackfillLimit: readNonNegativeInteger(env, "PRIME_DISCORD_HISTORY_BACKFILL_LIMIT", 50),
 		maxAttachmentBytes: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_ATTACHMENT_BYTES", 32 * 1024 * 1024),
 		maxAttachments: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_ATTACHMENTS", 5),
+		maxOutboundAttachmentBytes: readNonNegativeInteger(
+			env,
+			"PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENT_BYTES",
+			25 * 1024 * 1024,
+		),
+		maxOutboundAttachments: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENTS", 5),
 		attachmentTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS", 30_000),
 		streamUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS", 1_000),
 		registerCommands: readBoolean(env, "PRIME_DISCORD_REGISTER_COMMANDS", true),

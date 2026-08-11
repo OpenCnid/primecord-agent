@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Client, MessageType } from "discord.js";
@@ -88,6 +89,8 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		historyBackfillLimit: 50,
 		maxAttachmentBytes: 32 * 1024 * 1024,
 		maxAttachments: 5,
+		maxOutboundAttachmentBytes: 25 * 1024 * 1024,
+		maxOutboundAttachments: 5,
 		attachmentTimeoutMs: 30_000,
 		streamUpdateIntervalMs: 1_000,
 		registerCommands: false,
@@ -242,6 +245,32 @@ function createRunInteraction(
 	};
 }
 
+function createThreadInteraction(channel: object): {
+	interaction: object;
+	deferReply: ReturnType<typeof vi.fn>;
+	editReply: ReturnType<typeof vi.fn>;
+} {
+	const deferReply = vi.fn(async (_payload: unknown) => undefined);
+	const editReply = vi.fn(async (_payload: unknown) => undefined);
+	return {
+		interaction: {
+			isChatInputCommand: () => true,
+			channel,
+			channelId: "guild-channel-1",
+			guildId: "guild-1",
+			member: null,
+			user: { id: "user-1", bot: false },
+			commandName: "thread",
+			inGuild: () => true,
+			options: { getString: (_name: string, _required: boolean) => "Design review" },
+			deferReply,
+			editReply,
+		},
+		deferReply,
+		editReply,
+	};
+}
+
 describe("DiscordBridge lifecycle", () => {
 	it("waits for asynchronous Discord client destruction before stop resolves", async () => {
 		const destroyGate = deferred<void>();
@@ -352,6 +381,119 @@ describe("DiscordBridge lifecycle", () => {
 		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
 		expect(editReply.mock.calls[0]?.[0]).toMatchObject({ content: expect.stringContaining("/new") });
 		await bridge.stop();
+	});
+
+	it("creates an isolated Prime Agent thread with the /thread command", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-thread-session.jsonl")),
+			[],
+		);
+		const threadSends: Array<{ content?: string }> = [];
+		const thread = {
+			id: "thread-1",
+			isSendable: () => true,
+			isThread: () => true,
+			send: vi.fn(async (payload: { content?: string }) => {
+				threadSends.push(payload);
+				return { edit: vi.fn(), delete: vi.fn() };
+			}),
+		};
+		const create = vi.fn(async () => thread);
+		const channel = {
+			id: "guild-channel-1",
+			isTextBased: () => true,
+			isDMBased: () => false,
+			isThread: () => false,
+			isThreadOnly: () => false,
+			threads: { create },
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, {}, factory);
+		const { interaction, deferReply, editReply } = createThreadInteraction(channel);
+		await bridge.start();
+
+		client.emit("interactionCreate", interaction);
+		await vi.waitFor(() => expect(editReply).toHaveBeenCalledOnce());
+
+		expect(deferReply).toHaveBeenCalledWith({ ephemeral: true });
+		expect(create).toHaveBeenCalledWith({
+			name: "Design review",
+			autoArchiveDuration: 60,
+			reason: "Prime Agent conversation requested with /thread",
+		});
+		expect(threadSends).toEqual([
+			{
+				content: "Started a new Prime Agent session. Send a message in this thread to begin.",
+				allowedMentions: { parse: [], repliedUser: false },
+			},
+		]);
+		expect(editReply.mock.calls[0]?.[0]).toEqual({
+			content: "Created a new Prime Agent conversation in <#thread-1>.",
+			allowedMentions: { parse: [], repliedUser: false },
+		});
+		await bridge.stop();
+	});
+
+	it("uploads workspace media requested by a final agent response", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "prime-discord-media-workspace-"));
+		try {
+			await writeFile(join(workspace, "chart.png"), "chart bytes");
+			const client = new FakeDiscordClient();
+			const connection = new FakeBridgeConnection(
+				bridgeState(join(tmpdir(), "prime-discord-media-session.jsonl")),
+				[],
+			);
+			connection.lastAssistantText = "Here is the chart.\nMEDIA:chart.png";
+			const sends: Array<Record<string, unknown>> = [];
+			const edits: Array<{ content?: string }> = [];
+			const channel = {
+				id: "dm-1",
+				isThread: () => false,
+				isSendable: () => true,
+				sendTyping: vi.fn(async () => undefined),
+				send: vi.fn(async (payload: Record<string, unknown>) => {
+					sends.push(payload);
+					return {
+						edit: vi.fn(async (editPayload: { content?: string }) => edits.push(editPayload)),
+						delete: vi.fn(),
+					};
+				}),
+			};
+			const message = {
+				id: "message-1",
+				content: "make a chart",
+				webhookId: null,
+				system: false,
+				type: MessageType.Default,
+				channel,
+				channelId: "dm-1",
+				guildId: null,
+				member: null,
+				author: { id: "user-1", bot: false, username: "user" },
+				mentions: { users: { has: () => false, some: () => false } },
+				attachments: { map: () => [] },
+				inGuild: () => false,
+			};
+			const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+			const bridge = createBridge(client, { cwd: workspace, reactions: false, streamUpdateIntervalMs: 0 }, factory);
+			await bridge.start();
+
+			client.emit("messageCreate", message);
+			await vi.waitFor(() => expect(sends).toHaveLength(2));
+
+			expect(edits).toEqual([
+				{ content: "Here is the chart.\n\nAttached 1 file.", allowedMentions: { parse: [], repliedUser: false } },
+			]);
+			expect(sends[0]).toMatchObject({ content: "Prime Agent is working…" });
+			expect(sends[1]).toMatchObject({
+				files: [{ attachment: Buffer.from("chart bytes"), name: "chart.png" }],
+				allowedMentions: { parse: [], repliedUser: false },
+			});
+			await bridge.stop();
+		} finally {
+			await rm(workspace, { recursive: true, force: true });
+		}
 	});
 
 	it("submits discovered commands as raw Prime Agent slash invocations", async () => {
