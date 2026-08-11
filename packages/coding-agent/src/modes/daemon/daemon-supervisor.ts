@@ -2159,6 +2159,7 @@ export class DaemonSupervisor {
 		activeSessionId: string | undefined,
 		message: string,
 	): void {
+		if (!this.discordGatewayRequestOwners) return;
 		for (const [key, request] of this.discordGatewayRequestOwners) {
 			if (
 				request.client !== client ||
@@ -2175,6 +2176,7 @@ export class DaemonSupervisor {
 	}
 
 	private cancelTargetDiscordGatewayRequests(targetId: string, message: string): void {
+		if (!this.discordGatewayRequestOwners) return;
 		for (const [key, request] of this.discordGatewayRequestOwners) {
 			if (request.targetId !== targetId) continue;
 			this.discordGatewayRequestOwners.delete(key);
@@ -2191,6 +2193,7 @@ export class DaemonSupervisor {
 		activeSessionId: string,
 		message: string,
 	): void {
+		if (!this.discordGatewayRequestOwners) return;
 		for (const [key, request] of this.discordGatewayRequestOwners) {
 			if (request.worker !== worker || request.activeSessionId !== activeSessionId) continue;
 			this.discordGatewayRequestOwners.delete(key);
