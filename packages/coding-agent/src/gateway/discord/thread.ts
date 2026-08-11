@@ -13,6 +13,8 @@ export interface DiscordThreadCreationScope {
 	kind: "dm" | "guild" | "thread";
 	channelId: string;
 	guildId?: string;
+	/** The initiating guild-message ID; never supplied by the agent. */
+	messageId?: string;
 }
 
 export interface DiscordThreadCreationSourceChannel {
@@ -25,7 +27,7 @@ export interface DiscordThreadCreationSourceChannel {
 export interface DiscordThreadCreationParentChannel extends DiscordThreadCreationSourceChannel {
 	kind: "guild";
 	canUserCreateThread(userId: string): Promise<boolean>;
-	createThread(title: string): Promise<{ id: string }>;
+	createThread(title: string, startMessageId?: string): Promise<{ id: string }>;
 }
 
 export interface DiscordThreadCreationAdapter {
@@ -57,7 +59,7 @@ export class DiscordThreadCreationService {
 			const title = normalizeThreadTitle(input.title);
 			const { source, parent } = await this.resolveParent(scope);
 			await this.authorize(scope, source, parent);
-			const thread = await parent.createThread(title);
+			const thread = await parent.createThread(title, source.kind === "guild" ? scope.messageId : undefined);
 			if (!DISCORD_SNOWFLAKE_PATTERN.test(thread.id)) {
 				throw unavailable("Discord did not return a valid created thread.");
 			}

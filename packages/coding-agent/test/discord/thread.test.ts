@@ -14,6 +14,7 @@ const CHANNEL = "300000000000000001";
 const THREAD = "400000000000000001";
 const NEW_THREAD = "500000000000000001";
 const USER = "600000000000000001";
+const MESSAGE = "700000000000000001";
 
 function policy(overrides: Partial<DiscordRoutingPolicy> = {}): DiscordRoutingPolicy {
 	return {
@@ -34,7 +35,7 @@ function policy(overrides: Partial<DiscordRoutingPolicy> = {}): DiscordRoutingPo
 }
 
 function scope(overrides: Partial<DiscordThreadCreationScope> = {}): DiscordThreadCreationScope {
-	return { userId: USER, kind: "guild", guildId: GUILD, channelId: CHANNEL, ...overrides };
+	return { userId: USER, kind: "guild", guildId: GUILD, channelId: CHANNEL, messageId: MESSAGE, ...overrides };
 }
 
 function parent(overrides: Partial<DiscordThreadCreationParentChannel> = {}): DiscordThreadCreationParentChannel {
@@ -84,7 +85,7 @@ describe("DiscordThreadCreationService", () => {
   thread  `,
 		});
 
-		expect(createThread).toHaveBeenCalledWith("Planning thread");
+		expect(createThread).toHaveBeenCalledWith("Planning thread", MESSAGE);
 		expect(result).toEqual({
 			ok: true,
 			thread: {
@@ -106,7 +107,7 @@ describe("DiscordThreadCreationService", () => {
 		).create(scope({ kind: "thread", channelId: THREAD }), { title: "Sibling" });
 
 		expect(result).toMatchObject({ ok: true, thread: { id: NEW_THREAD, name: "Sibling" } });
-		expect(createThread).toHaveBeenCalledTimes(1);
+		expect(createThread).toHaveBeenCalledWith("Sibling", undefined);
 	});
 
 	it("fails closed for DMs, missing parents, policy denial, identity loss, and missing user permission", async () => {
