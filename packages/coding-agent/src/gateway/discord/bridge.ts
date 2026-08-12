@@ -158,6 +158,55 @@ const EXTENSION_UI_RETRY_MS = 5_000;
 const ROLE_LOOKUP_CACHE_MS = 60_000;
 const MAX_ROLE_LOOKUP_CACHE_ENTRIES = 10_000;
 
+class DiscordProgressReporter {
+	private readonly activeToolLabels = new Map<string, string>();
+	private readonly startedAt = Date.now();
+	private connectionActivity: string | undefined;
+	private timer: ReturnType<typeof setInterval> | undefined;
+
+	constructor(
+		private readonly writer: DiscordResponseWriter,
+		updateIntervalMs: number,
+	) {
+		if (updateIntervalMs > 0) {
+			this.timer = setInterval(() => this.publish(true), updateIntervalMs);
+		}
+	}
+
+	observeConnection(event: AgentConnectionEvent): void {
+		if (event.type !== "connection_status") return;
+		this.connectionActivity = event.status === "reconnecting" ? "Reconnecting to Prime Agent." : undefined;
+		this.publish(false);
+	}
+
+	observeTool(event: AgentConnectionEvent): void {
+		if (event.type !== "session_event") return;
+		if (event.event.type === "tool_execution_start") {
+			this.activeToolLabels.set(event.event.toolCallId, progressLabel(event.event.toolName));
+			this.publish(false);
+			return;
+		}
+		if (event.event.type === "tool_execution_end") {
+			this.activeToolLabels.delete(event.event.toolCallId);
+			this.publish(false);
+		}
+	}
+
+	stop(): void {
+		if (this.timer) clearInterval(this.timer);
+		this.timer = undefined;
+		this.writer.setProgress(undefined);
+	}
+
+	private publish(includeHeartbeat: boolean): void {
+		const activity =
+			this.connectionActivity ?? [...this.activeToolLabels.values()].at(-1) ?? "Prime Agent is working.";
+		const elapsedSeconds = Math.max(1, Math.floor((Date.now() - this.startedAt) / 1_000));
+		const message = includeHeartbeat ? `${activity} Still working (${elapsedSeconds}s elapsed).` : activity;
+		this.writer.setProgress(`_${message}_`);
+	}
+}
+
 export class DiscordBridge {
 	private readonly client: Client;
 	private readonly logger: Pick<Console, "info" | "warn" | "error">;
@@ -409,7 +458,11 @@ export class DiscordBridge {
 		const decision = routeMessage(routeInput, this.config);
 		if (decision.action === "ignore" || !this.dedupe.add(message.id)) return;
 
-		const targetChannel = decision.createThread ? await this.createThread(message, sourceChannel) : sourceChannel;
+		const targetChannel = decision.createThread ? await this.createThread(message) : sourceChannel;
+		if (!targetChannel) {
+			if (this.config.reactions) await safeReaction(message, "❌");
+			return;
+		}
 		const sessionKey = createDiscordMessageSessionKey(message, targetChannel, this.config.groupSessionsPerUser);
 
 		await this.dispatchQueue.enqueue(sessionKey, async () => {
@@ -430,6 +483,7 @@ export class DiscordBridge {
 
 		let attachments: ProcessedDiscordAttachments | undefined;
 		let writer: DiscordResponseWriter | undefined;
+		let progressReporter: DiscordProgressReporter | undefined;
 		let writerFinalized = false;
 		let unsubscribe: (() => void) | undefined;
 		try {
@@ -485,6 +539,7 @@ export class DiscordBridge {
 			if (writer.deliveryErrors.length > 0) {
 				throw new Error("Discord rejected the initial response message");
 			}
+			progressReporter = new DiscordProgressReporter(writer, this.config.progressUpdateIntervalMs);
 
 			let streamedText = "";
 			unsubscribe = connection.subscribe((event) => {
@@ -494,10 +549,8 @@ export class DiscordBridge {
 					writer?.append(delta);
 					return;
 				}
-				if (this.config.toolProgress) {
-					const progress = toolProgress(event);
-					if (progress) writer?.append(progress);
-				}
+				progressReporter?.observeConnection(event);
+				if (this.config.toolProgress) progressReporter?.observeTool(event);
 			});
 			const prompt = invocation
 				? [invocation.prompt, ...attachments.promptNotes].join("\n\n")
@@ -555,6 +608,7 @@ export class DiscordBridge {
 			if (this.config.reactions) await safeReaction(message, "❌");
 		} finally {
 			unsubscribe?.();
+			progressReporter?.stop();
 			await attachments?.cleanup().catch((error: unknown) => {
 				this.logger.warn(`Discord attachment cleanup failed: ${safeErrorMessage(error, this.config.botToken)}`);
 			});
@@ -617,8 +671,8 @@ export class DiscordBridge {
 		}
 	}
 
-	private async createThread(message: Message, fallback: SendableChannels): Promise<SendableChannels> {
-		if (!message.inGuild()) return fallback;
+	private async createThread(message: Message): Promise<SendableChannels | undefined> {
+		if (!message.inGuild()) return undefined;
 		try {
 			return await message.startThread({
 				name: threadName(message),
@@ -627,7 +681,7 @@ export class DiscordBridge {
 			});
 		} catch (error) {
 			this.logger.warn(`Discord auto-thread creation failed: ${safeErrorMessage(error, this.config.botToken)}`);
-			return fallback;
+			return undefined;
 		}
 	}
 
@@ -1504,10 +1558,10 @@ function textDelta(event: AgentConnectionEvent): string | undefined {
 	return event.event.assistantMessageEvent.type === "text_delta" ? event.event.assistantMessageEvent.delta : undefined;
 }
 
-function toolProgress(event: AgentConnectionEvent): string | undefined {
-	if (event.type !== "session_event" || event.event.type !== "tool_execution_start") return undefined;
-	const toolName = truncateText(event.event.toolName.replaceAll("`", "'"), 80);
-	return `\n\n_Using \`${toolName}\`…_\n\n`;
+function progressLabel(toolName: string): string {
+	return toolName === "ipython"
+		? "Inspecting the workspace and carrying out the next step."
+		: "Using a tool to continue the task.";
 }
 
 function threadName(message: Message): string {

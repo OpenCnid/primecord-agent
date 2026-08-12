@@ -97,6 +97,7 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		maxOutboundAttachments: 5,
 		attachmentTimeoutMs: 30_000,
 		streamUpdateIntervalMs: 1_000,
+		progressUpdateIntervalMs: 30_000,
 		registerCommands: false,
 		toolProgress: true,
 		extensionUiTimeoutMs: 300_000,
@@ -154,8 +155,10 @@ class FakeBridgeConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
 	private readonly responseGate = deferred<void>();
 	readonly prompts: string[] = [];
+	readonly toolEvents: AgentConnectionEvent[] = [];
 	readonly extensionResponses: Array<{ id: string; response: Record<string, unknown> }> = [];
 	extensionRequest: AgentConnectionEvent | undefined;
+	toolEventDelayMs = 0;
 	lastAssistantText = "resource response";
 	responseFailures = 0;
 
@@ -179,6 +182,12 @@ class FakeBridgeConnection {
 
 	async promptAndWait(prompt: string): Promise<void> {
 		this.prompts.push(prompt);
+		for (const event of this.toolEvents) {
+			for (const listener of this.listeners) void listener(event);
+		}
+		if (this.toolEventDelayMs > 0) {
+			await new Promise<void>((resolve) => setTimeout(resolve, this.toolEventDelayMs));
+		}
 		if (!this.extensionRequest) return;
 		for (const listener of this.listeners) void listener(this.extensionRequest);
 		await this.responseGate.promise;
@@ -500,6 +509,65 @@ describe("DiscordBridge lifecycle", () => {
 		}
 	});
 
+	it("shows a sanitized generic update for an IPython step", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-progress-session.jsonl")),
+			[],
+		);
+		connection.lastAssistantText = "Completed the requested work.";
+		connection.toolEvents.push({
+			type: "session_event",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "ipython-1",
+				toolName: "ipython",
+				args: { code: "secret workspace command" },
+			},
+		});
+		connection.toolEventDelayMs = 25;
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (payload: { content?: string }) => edits.push(payload)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "inspect the workspace",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(
+			client,
+			{ reactions: false, streamUpdateIntervalMs: 0, progressUpdateIntervalMs: 5 },
+			factory,
+		);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(edits.at(-1)?.content).toBe("Completed the requested work."));
+
+		expect(
+			edits.some((edit) => edit.content?.includes("Inspecting the workspace and carrying out the next step.")),
+		).toBe(true);
+		expect(edits.some((edit) => edit.content?.includes("Still working"))).toBe(true);
+		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("secret workspace command");
+		await bridge.stop();
+	});
+
 	it("submits discovered commands as raw Prime Agent slash invocations", async () => {
 		const client = new FakeDiscordClient();
 		const connection = new FakeBridgeConnection(bridgeState(join(tmpdir(), "prime-discord-resource-session.jsonl")), [
@@ -637,6 +705,47 @@ describe("DiscordBridge lifecycle", () => {
 		expect(sends.map((payload) => payload.content).join("\n")).toContain("Run this command in a bot DM");
 		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("Private credential");
 		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("sensitive-prefill");
+		await bridge.stop();
+	});
+
+	it("does not process a parent message when daughter-thread creation fails", async () => {
+		const client = new FakeDiscordClient();
+		const parentSends: Array<Record<string, unknown>> = [];
+		const parent = {
+			id: "parent-1",
+			isSendable: () => true,
+			isThread: () => false,
+			send: vi.fn(async (payload: Record<string, unknown>) => {
+				parentSends.push(payload);
+				return { edit: vi.fn() };
+			}),
+		};
+		const startThread = vi.fn(async () => {
+			throw new Error("Discord denied thread creation");
+		});
+		const message = {
+			id: "message-1",
+			content: "start a focused task",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel: parent,
+			channelId: "parent-1",
+			guildId: "guild-1",
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => true, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => true,
+			startThread,
+		};
+		const bridge = createBridge(client, { reactions: false });
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(startThread).toHaveBeenCalledOnce());
+
+		expect(parentSends).toEqual([]);
 		await bridge.stop();
 	});
 });

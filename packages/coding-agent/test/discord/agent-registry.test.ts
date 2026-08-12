@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { type DiscordAgentConnectionFactory, DiscordAgentRegistry } from "../../src/gateway/discord/agent-registry.js";
 import type {
 	AgentConnection,
+	AgentConnectionEvent,
 	AgentConnectionEventListener,
 	AgentConnectionState,
 } from "../../src/modes/agent-connection/types.js";
@@ -52,6 +53,10 @@ class FakeAgentConnection implements RegistryConnection {
 	async dispose(): Promise<void> {
 		this.disposeCalls++;
 		await this.disposeGate;
+	}
+
+	async emit(event: AgentConnectionEvent): Promise<void> {
+		await Promise.all([...this.listeners].map((listener) => listener(event)));
 	}
 
 	asAgentConnection(): AgentConnection {
@@ -173,6 +178,29 @@ describe("DiscordAgentRegistry", () => {
 			expect(beta).toBe(connections.get("beta"));
 			expect(alpha).not.toBe(beta);
 			expect(sessionDirectories.get("alpha")).not.toBe(sessionDirectories.get("beta"));
+			await registry.dispose();
+		});
+	});
+
+	it("evicts a terminally closed connection so the next Discord message can reattach", async () => {
+		await withTemporaryDirectory(async (root) => {
+			const first = new FakeAgentConnection(createState("active-1", join(root, "session-1.jsonl")));
+			const second = new FakeAgentConnection(createState("active-2", join(root, "session-2.jsonl")));
+			const connections = [first, second];
+			let factoryCalls = 0;
+			const registry = createRegistry(root, async () => {
+				const connection = connections[factoryCalls++];
+				if (!connection) throw new Error("Unexpected connection request");
+				return connection.asAgentConnection();
+			});
+
+			await registry.getOrCreate("thread-key");
+			await first.emit({ type: "closed", error: "Daemon reconnection failed" });
+
+			expect(first.disposeCalls).toBe(1);
+			expect(registry.getExisting("thread-key")).toBeUndefined();
+			await expect(registry.getOrCreate("thread-key")).resolves.toBe(second);
+			expect(factoryCalls).toBe(2);
 			await registry.dispose();
 		});
 	});

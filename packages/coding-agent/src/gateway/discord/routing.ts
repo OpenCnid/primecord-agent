@@ -68,6 +68,10 @@ function isAuthorized(input: DiscordMessageRouteInput, policy: DiscordRoutingPol
 	return input.kind !== "dm" && !hasIdentityAllowlist && policy.allowedChannels.length > 0 && channelAllowed;
 }
 
+function shouldCreateParentThread(input: DiscordMessageRouteInput, policy: DiscordRoutingPolicy): boolean {
+	return policy.autoThread && input.kind === "guild" && !includesChannel(policy.noThreadChannels, input);
+}
+
 function respond(reason: DiscordRespondReason, createThread = false): DiscordRouteDecision {
 	return { action: "respond", reason, createThread };
 }
@@ -104,18 +108,15 @@ export function routeMessage(input: DiscordMessageRouteInput, policy: DiscordRou
 	}
 
 	const freeResponse = includesChannel(policy.freeResponseChannels, input);
-	if (freeResponse) return respond("free_response_channel");
+	if (freeResponse) return respond("free_response_channel", shouldCreateParentThread(input, policy));
 
 	if (input.kind === "thread" && !policy.threadRequireMention && input.botParticipatedInThread) {
 		return respond("thread_continuation");
 	}
 
-	if (!policy.requireMention) return respond("mention_not_required");
+	if (!policy.requireMention) return respond("mention_not_required", shouldCreateParentThread(input, policy));
 
-	if (input.mentionsBot) {
-		const noThread = includesChannel(policy.noThreadChannels, input);
-		return respond("mentioned", policy.autoThread && input.kind === "guild" && !noThread);
-	}
+	if (input.mentionsBot) return respond("mentioned", shouldCreateParentThread(input, policy));
 
 	return { action: "ignore", reason: "mention_required" };
 }

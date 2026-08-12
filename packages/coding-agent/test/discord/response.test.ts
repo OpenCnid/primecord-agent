@@ -121,6 +121,29 @@ describe("DiscordResponseWriter", () => {
 		await expect(writer.finish()).resolves.toMatchObject({ chunks: ["hello world again"], deliveryErrors: [] });
 	});
 
+	it("shows transient progress without including it in the final response", async () => {
+		const channel = new FakeChannel();
+		const writer = await createDiscordResponseWriter(channel, { updateIntervalMs: 1_000 });
+
+		writer.setProgress("Inspecting the workspace and carrying out the next step.");
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(channel.messages[0].edits.map((edit) => edit.content)).toEqual([
+			"Inspecting the workspace and carrying out the next step.",
+		]);
+
+		writer.append("Partial response");
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(channel.messages[0].edits.map((edit) => edit.content)).toEqual([
+			"Inspecting the workspace and carrying out the next step.",
+			"Partial response\n\nInspecting the workspace and carrying out the next step.",
+		]);
+
+		const finalization = writer.finish("Final response");
+		await vi.advanceTimersByTimeAsync(1_000);
+		await expect(finalization).resolves.toMatchObject({ chunks: ["Final response"] });
+		expect(channel.messages[0].edits.at(-1)?.content).toBe("Final response");
+	});
+
 	it("finalizes long output into one edit and additional messages", async () => {
 		const channel = new FakeChannel();
 		const writer = await createDiscordResponseWriter(channel, { updateIntervalMs: 1_000 });

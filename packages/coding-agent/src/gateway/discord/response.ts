@@ -193,7 +193,8 @@ export class DiscordResponseWriter {
 		Pick<DiscordResponseWriterOptions, "onDeliveryError">;
 	readonly #errors: unknown[];
 	#text = "";
-	#lastStreamedText = "";
+	#progress = "";
+	#lastStreamedPreview = "";
 	#lastEditAt: number | undefined;
 	#timer: ReturnType<typeof setTimeout> | undefined;
 	#operations: Promise<void> = Promise.resolve();
@@ -224,6 +225,14 @@ export class DiscordResponseWriter {
 		this.#scheduleUpdate();
 	}
 
+	setProgress(progress: string | undefined): void {
+		if (this.#finished) return;
+		const next = progress ?? "";
+		if (next === this.#progress) return;
+		this.#progress = next;
+		this.#scheduleUpdate();
+	}
+
 	async finish(finalText?: string): Promise<DiscordResponseWriteResult> {
 		const content = finalText ?? this.#text;
 		return this.#finalize(content || this.#options.emptyText);
@@ -246,15 +255,19 @@ export class DiscordResponseWriter {
 				: Math.max(0, this.#options.updateIntervalMs - elapsed);
 		this.#timer = setTimeout(() => {
 			this.#timer = undefined;
-			const snapshot = this.#text;
+			const snapshot = this.#previewText();
 			this.#queue(async () => {
-				if (!this.#message || snapshot === this.#lastStreamedText) return;
+				if (!this.#message || !snapshot || snapshot === this.#lastStreamedPreview) return;
 				const chunks = splitDiscordMessage(snapshot);
 				const preview = chunks[chunks.length - 1];
 				if (!preview) return;
-				if (await this.#edit(preview)) this.#lastStreamedText = snapshot;
+				if (await this.#edit(preview)) this.#lastStreamedPreview = snapshot;
 			});
 		}, delay);
+	}
+
+	#previewText(): string {
+		return [this.#text, this.#progress].filter((section) => section.length > 0).join("\n\n");
 	}
 
 	#queue(operation: () => Promise<void>): void {
@@ -310,7 +323,7 @@ export class DiscordResponseWriter {
 		const first = chunks[0] ?? this.#options.emptyText;
 		if (!this.#message) {
 			await this.#send(first);
-		} else if (chunks.length > 1 || this.#lastStreamedText !== content) {
+		} else if (chunks.length > 1 || this.#lastStreamedPreview !== content) {
 			await this.#edit(first);
 		}
 		for (const chunk of chunks.slice(1)) await this.#send(chunk);
