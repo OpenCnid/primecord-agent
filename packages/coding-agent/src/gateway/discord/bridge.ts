@@ -587,6 +587,9 @@ export class DiscordBridge {
 				outboundMedia.attachments.length,
 				outboundMedia.errors,
 			);
+			// Clear the bridge-owned status before replacing the receipt with the terminal response.
+			progressReporter?.stop();
+			progressReporter = undefined;
 			const deliveryErrorsBeforeFinish = writer.deliveryErrors.length;
 			const result = await writer.finish(responseText);
 			writerFinalized = true;
@@ -597,13 +600,13 @@ export class DiscordBridge {
 
 			if (this.config.reactions) await safeReaction(message, "✅");
 		} catch (error) {
-			const messageText = safeErrorMessage(error, this.config.botToken);
+			const failureText = isUnsubmittedBusyPromptError(error)
+				? "Prime Agent already has work in progress or queued. This message was not submitted; please send it again once the session is idle."
+				: `Prime Agent failed: ${safeErrorMessage(error, this.config.botToken)}`;
 			if (writer && !writerFinalized) {
-				await writer
-					.fail(`Prime Agent failed: ${messageText}`)
-					.catch(() => safeSend(targetChannel, `Prime Agent failed: ${messageText}`));
+				await writer.fail(failureText).catch(() => safeSend(targetChannel, failureText));
 			} else {
-				await safeSend(targetChannel, `Prime Agent failed: ${messageText}`);
+				await safeSend(targetChannel, failureText);
 			}
 			if (this.config.reactions) await safeReaction(message, "❌");
 		} finally {
@@ -1551,6 +1554,13 @@ function responseChannel(channel: SendableChannels, source: Message): DiscordRes
 			});
 		},
 	};
+}
+
+function isUnsubmittedBusyPromptError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	return /^(?:Agent is already processing|Agent has queued work)\. Specify streamingBehavior \('steer' or 'followUp'\) to queue the message\.$/.test(
+		error.message,
+	);
 }
 
 function textDelta(event: AgentConnectionEvent): string | undefined {

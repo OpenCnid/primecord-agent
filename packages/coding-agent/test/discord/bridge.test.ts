@@ -11,6 +11,7 @@ import type {
 	AgentConnection,
 	AgentConnectionEvent,
 	AgentConnectionEventListener,
+	AgentConnectionPromptOptions,
 	AgentConnectionSlashCommand,
 	AgentConnectionState,
 } from "../../src/modes/agent-connection/types.js";
@@ -155,12 +156,15 @@ class FakeBridgeConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
 	private readonly responseGate = deferred<void>();
 	readonly prompts: string[] = [];
+	readonly promptOptions: Array<AgentConnectionPromptOptions | undefined> = [];
 	readonly toolEvents: AgentConnectionEvent[] = [];
+	readonly promptGates: Promise<void>[] = [];
 	readonly extensionResponses: Array<{ id: string; response: Record<string, unknown> }> = [];
 	extensionRequest: AgentConnectionEvent | undefined;
 	toolEventDelayMs = 0;
 	lastAssistantText = "resource response";
 	responseFailures = 0;
+	rejectBusyPrompt: string | undefined;
 
 	constructor(
 		private readonly state: AgentConnectionState,
@@ -180,14 +184,18 @@ class FakeBridgeConnection {
 		return this.commands;
 	}
 
-	async promptAndWait(prompt: string): Promise<void> {
+	async promptAndWait(prompt: string, options?: AgentConnectionPromptOptions): Promise<void> {
 		this.prompts.push(prompt);
+		this.promptOptions.push(options);
+		if (this.rejectBusyPrompt) throw new Error(this.rejectBusyPrompt);
 		for (const event of this.toolEvents) {
 			for (const listener of this.listeners) void listener(event);
 		}
 		if (this.toolEventDelayMs > 0) {
 			await new Promise<void>((resolve) => setTimeout(resolve, this.toolEventDelayMs));
 		}
+		const gate = this.promptGates.shift();
+		if (gate) await gate;
 		if (!this.extensionRequest) return;
 		for (const listener of this.listeners) void listener(this.extensionRequest);
 		await this.responseGate.promise;
@@ -565,6 +573,118 @@ describe("DiscordBridge lifecycle", () => {
 		).toBe(true);
 		expect(edits.some((edit) => edit.content?.includes("Still working"))).toBe(true);
 		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("secret workspace command");
+		await bridge.stop();
+	});
+
+	it("serializes same-session messages while showing bridge-owned liveness", async () => {
+		const client = new FakeDiscordClient();
+		const firstTurn = deferred<void>();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-same-session-queue.jsonl")),
+			[],
+		);
+		connection.promptGates.push(firstTurn.promise);
+		connection.lastAssistantText = "Completed the queued work.";
+		const responses: Array<{ edits: Array<{ content?: string }> }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => {
+				const response = { edits: [] as Array<{ content?: string }> };
+				responses.push(response);
+				return { edit: vi.fn(async (edit: { content?: string }) => response.edits.push(edit)) };
+			}),
+		};
+		const message = (id: string, content: string) => ({
+			id,
+			content,
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		});
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(
+			client,
+			{ reactions: false, streamUpdateIntervalMs: 0, progressUpdateIntervalMs: 5 },
+			factory,
+		);
+		await bridge.start();
+
+		client.emit("messageCreate", message("message-1", "first request"));
+		await vi.waitFor(() => expect(connection.prompts).toHaveLength(1));
+		await vi.waitFor(() =>
+			expect(responses[0]?.edits.some((edit) => edit.content?.includes("Still working"))).toBe(true),
+		);
+
+		client.emit("messageCreate", message("message-2", "second request"));
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		expect(connection.prompts).toHaveLength(1);
+		expect(responses).toHaveLength(1);
+
+		firstTurn.resolve();
+		await vi.waitFor(() => expect(connection.prompts).toHaveLength(2));
+		expect(connection.prompts[0]).toContain("first request");
+		expect(connection.prompts[1]).toContain("second request");
+		await vi.waitFor(() => expect(responses).toHaveLength(2));
+		await vi.waitFor(() =>
+			expect(responses.every((response) => response.edits.at(-1)?.content === "Completed the queued work.")).toBe(
+				true,
+			),
+		);
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		expect(responses.every((response) => response.edits.at(-1)?.content === "Completed the queued work.")).toBe(true);
+		await bridge.stop();
+	});
+
+	it.each([
+		"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+		"Agent has queued work. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+	])("reports an unsubmitted shared-session busy request without exposing the scheduler error", async (busyPrompt) => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(bridgeState(join(tmpdir(), "prime-discord-busy-session.jsonl")), []);
+		connection.rejectBusyPrompt = busyPrompt;
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (payload: { content?: string }) => edits.push(payload)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "continue after current work",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, { reactions: false, streamUpdateIntervalMs: 0 }, factory);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(edits.at(-1)?.content).toContain("This message was not submitted"));
+
+		expect(connection.promptOptions[0]?.streamingBehavior).toBeUndefined();
+		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("Specify streamingBehavior");
 		await bridge.stop();
 	});
 
