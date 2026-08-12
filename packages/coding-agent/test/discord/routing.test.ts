@@ -151,8 +151,30 @@ describe("routeMessage", () => {
 		});
 	});
 
-	it("only creates threads for mentioned regular channels that permit auto-threading", () => {
+	it("creates a daughter thread for every admitted parent-channel message", () => {
 		expect(routeMessage(message(), policy())).toMatchObject({ action: "respond", createThread: true });
+		expect(routeMessage(message({ mentionsBot: false }), policy({ freeResponseChannels: ["channel-1"] }))).toEqual({
+			action: "respond",
+			reason: "free_response_channel",
+			createThread: true,
+		});
+		expect(routeMessage(message({ mentionsBot: false }), policy({ requireMention: false }))).toEqual({
+			action: "respond",
+			reason: "mention_not_required",
+			createThread: true,
+		});
+		expect(
+			routeMessage(message({ kind: "thread", mentionsBot: false, botParticipatedInThread: true }), policy()),
+		).toEqual({
+			action: "respond",
+			reason: "thread_continuation",
+			createThread: false,
+		});
+		expect(routeMessage(message({ kind: "dm", mentionsBot: false }), policy())).toEqual({
+			action: "respond",
+			reason: "direct_message",
+			createThread: false,
+		});
 		expect(routeMessage(message(), policy({ autoThread: false }))).toMatchObject({
 			action: "respond",
 			createThread: false,

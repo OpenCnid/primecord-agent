@@ -31,6 +31,7 @@ export interface DiscordBridgeConfig {
 	maxOutboundAttachments: number;
 	attachmentTimeoutMs: number;
 	streamUpdateIntervalMs: number;
+	progressUpdateIntervalMs: number;
 	registerCommands: boolean;
 	toolProgress: boolean;
 	extensionUiTimeoutMs: number;
@@ -189,6 +190,7 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		maxOutboundAttachments: readNonNegativeInteger(env, "PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENTS", 5),
 		attachmentTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS", 30_000),
 		streamUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS", 1_000),
+		progressUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_PROGRESS_UPDATE_INTERVAL_MS", 30_000),
 		registerCommands: readBoolean(env, "PRIME_DISCORD_REGISTER_COMMANDS", true),
 		toolProgress: readBoolean(env, "PRIME_DISCORD_TOOL_PROGRESS", true),
 		extensionUiTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS", 300_000),

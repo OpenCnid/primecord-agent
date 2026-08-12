@@ -43,6 +43,7 @@ export interface DiscordAgentConnectionRequest {
 export type DiscordAgentConnectionFactory = (request: DiscordAgentConnectionRequest) => Promise<AgentConnection>;
 
 const EMPTY_STATE: PersistedRegistryState = { version: 1, sessions: {} };
+const DISCORD_DAEMON_RECONNECT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 export class DiscordAgentRegistry {
 	private readonly connections = new Map<string, AgentConnection>();
@@ -139,6 +140,16 @@ export class DiscordAgentRegistry {
 			await this.refreshMapping(key, connection);
 		}
 		await this.options.eventListener?.(key, connection, event);
+		if (event.type === "closed") await this.evictClosedConnection(key, connection);
+	}
+
+	private async evictClosedConnection(key: string, connection: AgentConnection): Promise<void> {
+		if (this.connections.get(key) !== connection) return;
+		this.connections.delete(key);
+		const unsubscribe = this.unsubscribes.get(key);
+		this.unsubscribes.delete(key);
+		unsubscribe?.();
+		await connection.dispose().catch(() => undefined);
 	}
 
 	private async refreshMapping(key: string, connection: AgentConnection): Promise<void> {
@@ -265,6 +276,7 @@ export class DiscordAgentRegistry {
 			supportsExtensionUi: true,
 			supportsDiscordGatewayRead: true,
 			supportsDiscordGatewayThreadCreation: true,
+			reconnectTimeoutMs: DISCORD_DAEMON_RECONNECT_TIMEOUT_MS,
 			recoverDaemon: () => ensureInteractiveDaemonRunning(this.options.socketPath, this.options.cwd),
 		});
 	}

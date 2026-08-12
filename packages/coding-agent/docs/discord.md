@@ -12,7 +12,7 @@ Prime Agent can run as a persistent Discord bot backed by the same resident daem
 4. Grant **View Channels**, **Send Messages**, **Read Message History**, **Send Messages in Threads**, **Create Public Threads**, and **Add Reactions**. **Embed Links** and **Attach Files** are recommended.
 5. Open the generated URL to add the bot to the server. Copy the bot token, but never commit it or place it in a Prime Agent prompt.
 
-The gateway responds to every authorized DM. In servers it requires an explicit mention by default. An eligible mention in a normal text channel starts a thread; later messages in that thread do not need another mention. Use `/thread` with a title to explicitly create a fresh Prime Agent conversation thread without sending an initial prompt.
+The gateway responds to every authorized DM. In servers it requires an explicit mention by default. With auto-threading enabled, every admitted message in a normal parent channel starts a fresh daughter thread: this includes eligible mentions, free-response channels, and ordinary channels when mentions are disabled. The agent's progress and terminal response stay in that daughter thread. Later messages in the daughter thread continue its session without creating nested threads. If Discord cannot create the daughter thread, the gateway does not run the task or post a fallback response in the parent channel. Use `/thread` with a title to explicitly create a fresh Prime Agent conversation thread without sending an initial prompt.
 
 ## Configure access
 
@@ -50,12 +50,12 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_ALLOW_ALL_USERS` | `false` | Explicitly authorize every user. Use with care. |
 | `PRIME_DISCORD_ALLOWED_CHANNELS` | empty | Restrict use to these server channels. Threads inherit their parent channel policy. |
 | `PRIME_DISCORD_IGNORED_CHANNELS` | empty | Deny these channels; this takes precedence over all allows. |
-| `PRIME_DISCORD_FREE_RESPONSE_CHANNELS` | empty | Respond without a bot mention in these channels and their threads. |
-| `PRIME_DISCORD_NO_THREAD_CHANNELS` | empty | Reply in place instead of creating a thread. |
+| `PRIME_DISCORD_FREE_RESPONSE_CHANNELS` | empty | Respond without a bot mention in these channels and their threads; admitted parent messages start daughter threads when auto-threading is enabled. |
+| `PRIME_DISCORD_NO_THREAD_CHANNELS` | empty | Reply in place instead of creating a thread. This explicitly opts those parent channels out of daughter-thread isolation. |
 | `PRIME_DISCORD_REQUIRE_MENTION` | `true` | Require the bot mention in ordinary server channels. |
 | `PRIME_DISCORD_THREAD_REQUIRE_MENTION` | `false` | Require a mention for follow-ups inside bot-owned threads. |
 | `PRIME_DISCORD_IGNORE_NO_MENTION` | `true` | Ignore messages that mention another user but not the bot. |
-| `PRIME_DISCORD_AUTO_THREAD` | `true` | Create a thread for a qualifying channel mention. |
+| `PRIME_DISCORD_AUTO_THREAD` | `true` | Create a fresh daughter thread for every admitted ordinary parent-channel message. |
 | `PRIME_DISCORD_REACTIONS` | `true` | Add working, success, and failure reactions when permitted. |
 | `PRIME_DISCORD_ALLOW_BOTS` | `none` | Other-bot policy: `none`, `mentions`, or `all`. `none` prevents bot loops. |
 | `PRIME_DISCORD_GROUP_SESSIONS_PER_USER` | `true` | Isolate users in shared channels. Set `false` only when a shared transcript is intentional. |
@@ -71,8 +71,9 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_MAX_OUTBOUND_ATTACHMENTS` | `5` | Maximum agent-generated `MEDIA:` uploads in one response; `0` disables uploads. |
 | `PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS` | `30000` | Attachment download timeout. |
 | `PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS` | `1000` | Minimum delay between streamed Discord edits. |
+| `PRIME_DISCORD_PROGRESS_UPDATE_INTERVAL_MS` | `30000` | Interval between general working-status updates during a long-running turn; `0` disables them. |
 | `PRIME_DISCORD_REGISTER_COMMANDS` | `true` | Register the gateway's global slash commands at startup. |
-| `PRIME_DISCORD_TOOL_PROGRESS` | `true` | Show tool names while work is in progress. Tool arguments and reasoning remain hidden. |
+| `PRIME_DISCORD_TOOL_PROGRESS` | `true` | Show general tool-progress updates while work is in progress. IPython calls are described only as workspace steps; arguments and reasoning remain hidden. |
 | `PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS` | `300000` | Maximum time to wait for a Discord response to an extension dialog. |
 | `PRIME_DISCORD_CWD` | process directory | Fixed working directory for all sessions. `--cwd` takes precedence. |
 | `PRIME_DISCORD_SESSION_DIR` | `~/.prime/agent/discord/sessions` | Discord-to-Prime session mapping and transcript root. |
@@ -84,8 +85,9 @@ When both identity and channel allowlists are configured, both checks must pass.
 
 - A DM is isolated by Discord user and DM channel.
 - A server channel or thread is isolated by guild, channel, and user unless `PRIME_DISCORD_GROUP_SESSIONS_PER_USER=false`.
+- Each auto-created daughter thread receives its own session key. Follow-up messages in that daughter reuse its session; the next admitted parent-channel message receives a new daughter and a new session.
 - Messages for one session run in order. Different sessions can run concurrently.
-- Prime sessions use resident daemon workers. Stopping the gateway detaches from them; restarting the gateway reattaches to active workers or restores their saved transcript.
+- Prime sessions use resident daemon workers. Stopping the gateway detaches from them; restarting the gateway reattaches to active workers or restores their saved transcript. A transient daemon disconnection is retried for up to 24 hours so a long-running Discord turn is not abandoned after the standard one-minute reconnect window.
 - `/new` replaces only the current Discord session mapping. `/abort` aborts that session and clears its queued Discord messages.
 
 Use `prime-agent shutdown` only when you intend to stop the resident Prime workers too.
@@ -134,7 +136,7 @@ Resource discovery uses Prime Agent's normal scopes relative to the fixed gatewa
 
 The gateway accepts only Discord CDN attachment URLs, checks count and byte limits while streaming, detects the actual file type, and stores files under a generated cache name. Images are passed to Prime Agent as image input. Small text files are included inline; other files are exposed to the session as a controlled local cache path and removed after the turn.
 
-Responses are split at Discord's 2,000-character limit with Markdown fences balanced across messages. Generated output cannot create `@everyone`, role, or user notifications because outgoing allowed mentions are disabled.
+Responses are split at Discord's 2,000-character limit with Markdown fences balanced across messages. During long-running turns, the gateway refreshes the working response with general status updates. An `ipython` call is shown only as a general workspace step; its code, arguments, output, results, and reasoning remain private. Generated output cannot create `@everyone`, role, or user notifications because outgoing allowed mentions are disabled.
 
 Agent responses can upload workspace artifacts using Hermes-compatible `MEDIA:/path/to/file` tags. The tag is removed from the text and the file is uploaded natively; relative paths resolve from `PRIME_DISCORD_CWD`. For safety, resolved files must remain inside that fixed workspace, including after symlink resolution. Uploads use the outbound count and byte limits above; rejected tags leave the text response intact with a delivery notice.
 
