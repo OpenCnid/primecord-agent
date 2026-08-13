@@ -15,6 +15,7 @@ import {
 	PermissionFlagsBits,
 	type SendableChannels,
 	SlashCommandBuilder,
+	Status,
 	type TextChannel,
 	ThreadAutoArchiveDuration,
 } from "discord.js";
@@ -232,6 +233,8 @@ export class DiscordBridge {
 	private startPromise: Promise<string> | undefined;
 	private stopPromise: Promise<void> | undefined;
 	private fatalError: Error | undefined;
+	private gatewayHealthTimer: ReturnType<typeof setInterval> | undefined;
+	private gatewayHealthFailures = 0;
 	private resolveStopped!: () => void;
 	private readonly stopped = new Promise<void>((resolve) => {
 		this.resolveStopped = resolve;
@@ -293,6 +296,10 @@ export class DiscordBridge {
 		this.client.on("interactionCreate", this.onInteraction);
 		this.client.on("error", this.onClientError);
 		this.client.on("invalidated", this.onInvalidated);
+		this.client.on("shardDisconnect", this.onShardDisconnect);
+		this.client.on("shardError", this.onShardError);
+		this.client.on("shardReconnecting", this.onShardReconnecting);
+		this.client.on("shardReady", this.onShardReady);
 		await this.client.login(this.config.botToken);
 		if (this.stopRequested) throw new Error("Discord gateway stopped during startup");
 		if (!this.client.user) throw new Error("Discord client became ready without a bot user");
@@ -308,6 +315,7 @@ export class DiscordBridge {
 		}
 		if (this.stopRequested) throw new Error("Discord gateway stopped during startup");
 		this.accepting = true;
+		this.startGatewayHealthMonitor();
 		return this.client.user.tag;
 	}
 
@@ -333,6 +341,63 @@ export class DiscordBridge {
 	private readonly onClientError = (error: Error): void => {
 		this.logger.error(`Discord client error: ${safeErrorMessage(error, this.config.botToken)}`);
 	};
+
+	private readonly onShardDisconnect = (event: unknown, shardId: number): void => {
+		const code = discordCloseCode(event);
+		this.logger.warn(
+			`Discord shard ${shardId} disconnected${code === undefined ? "" : ` (code ${code})`}; waiting for Discord.js recovery.`,
+		);
+	};
+
+	private readonly onShardError = (error: Error, shardId: number): void => {
+		this.logger.warn(`Discord shard ${shardId} error: ${safeErrorMessage(error, this.config.botToken)}`);
+	};
+
+	private readonly onShardReconnecting = (shardId: number): void => {
+		this.logger.info(`Discord shard ${shardId} is reconnecting.`);
+	};
+
+	private readonly onShardReady = (shardId: number): void => {
+		// The next health sample verifies every shard before clearing any failures.
+		this.logger.info(`Discord shard ${shardId} is ready.`);
+	};
+
+	private startGatewayHealthMonitor(): void {
+		if (this.config.gatewayHealthCheckIntervalMs === 0 || this.gatewayHealthTimer) return;
+		this.gatewayHealthTimer = setInterval(() => this.checkGatewayHealth(), this.config.gatewayHealthCheckIntervalMs);
+	}
+
+	private stopGatewayHealthMonitor(): void {
+		if (this.gatewayHealthTimer) clearInterval(this.gatewayHealthTimer);
+		this.gatewayHealthTimer = undefined;
+		this.gatewayHealthFailures = 0;
+	}
+
+	private checkGatewayHealth(): void {
+		if (!this.accepting || this.stopRequested) return;
+		const reason = discordGatewayHealthFailure(this.client, this.config.gatewayMaxPingMs);
+		if (!reason) {
+			this.gatewayHealthFailures = 0;
+			return;
+		}
+
+		this.gatewayHealthFailures += 1;
+		this.logger.warn(
+			`Discord Gateway WebSocket unhealthy (${reason}, ${this.gatewayHealthFailures}/${this.config.gatewayHealthFailureThreshold}).`,
+		);
+		if (this.gatewayHealthFailures < this.config.gatewayHealthFailureThreshold) return;
+
+		// Discord.js owns ordinary reconnects. A sustained bad state means event
+		// delivery is no longer trustworthy, so stop cleanly and let the service
+		// supervisor create a fresh client instead of risking duplicate dispatch.
+		this.fatalError ??= new Error(`Discord Gateway WebSocket remained unhealthy: ${reason}`);
+		this.logger.error(this.fatalError.message);
+		void this.stop().catch((error: unknown) => {
+			this.logger.error(
+				`Discord unhealthy-gateway shutdown failed: ${safeErrorMessage(error, this.config.botToken)}`,
+			);
+		});
+	}
 
 	private readonly onRegistryConnectionEvent = (
 		key: string,
@@ -606,9 +671,10 @@ export class DiscordBridge {
 
 			if (this.config.reactions) await safeReaction(message, "✅");
 		} catch (error) {
+			this.logger.warn(`Discord turn failed: ${safeErrorMessage(error, this.config.botToken)}`);
 			const failureText = isUnsubmittedBusyPromptError(error)
 				? "Prime Agent already has work in progress or queued. This message was not submitted; please send it again once the session is idle."
-				: `Prime Agent failed: ${safeErrorMessage(error, this.config.botToken)}`;
+				: "Prime Agent could not complete this request. Please try again or use /status.";
 			if (writer && !writerFinalized) {
 				const delivered = await writer
 					.fail(failureText)
@@ -1338,6 +1404,7 @@ export class DiscordBridge {
 	private async stopInternal(): Promise<void> {
 		try {
 			this.accepting = false;
+			this.stopGatewayHealthMonitor();
 			this.activeDiscordReadScopes.clear();
 			this.activeDiscordThreadCreationScopes.clear();
 			await Promise.allSettled(
@@ -1349,6 +1416,10 @@ export class DiscordBridge {
 			this.client.off("interactionCreate", this.onInteraction);
 			this.client.off("error", this.onClientError);
 			this.client.off("invalidated", this.onInvalidated);
+			this.client.off("shardDisconnect", this.onShardDisconnect);
+			this.client.off("shardError", this.onShardError);
+			this.client.off("shardReconnecting", this.onShardReconnecting);
+			this.client.off("shardReady", this.onShardReady);
 			const drain = this.dispatchQueue.stopAcceptingAndDrain();
 			const drained = await settlesBefore(drain, this.shutdownTimeoutMs);
 			if (!drained) {
@@ -1380,6 +1451,35 @@ function discordClientOptions(config: DiscordBridgeConfig): ClientOptions {
 		partials: [Partials.Channel],
 		allowedMentions: { parse: [], repliedUser: false },
 	};
+}
+
+/**
+ * Sample the actual Gateway WebSocket manager instead of a REST endpoint. A REST
+ * request can succeed while incoming Gateway events are stalled. This mirrors the
+ * liveness approach used by Hermes' Discord adapter, using only Discord.js public
+ * state so an upstream library update cannot make the probe depend on internals.
+ */
+function discordGatewayHealthFailure(client: Client, maxPingMs: number): string | undefined {
+	try {
+		if (!client.isReady()) return "client_not_ready";
+		if (client.ws.status !== Status.Ready) return "manager_not_ready";
+		const shards = [...client.ws.shards.values()];
+		if (shards.length === 0) return "no_shards";
+		if (shards.some((shard) => shard.status !== Status.Ready)) return "shard_not_ready";
+		if (maxPingMs === 0) return undefined;
+		const unhealthyPing = shards.find(
+			(shard) => !Number.isFinite(shard.ping) || shard.ping < 0 || shard.ping > maxPingMs,
+		);
+		return unhealthyPing ? "heartbeat_latency" : undefined;
+	} catch {
+		return "gateway_state_unavailable";
+	}
+}
+
+function discordCloseCode(event: unknown): number | undefined {
+	if (!event || typeof event !== "object" || !("code" in event)) return undefined;
+	const code = event.code;
+	return typeof code === "number" && Number.isSafeInteger(code) ? code : undefined;
 }
 
 function isDiscordThreadParentChannel(
@@ -1662,7 +1762,13 @@ async function safeSend(channel: SendableChannels, content: string): Promise<voi
 
 function safeErrorMessage(error: unknown, token: string): string {
 	const text = error instanceof Error ? error.message : String(error);
-	return text.replaceAll(token, "[REDACTED]").replace(/(https:\/\/[^\s?]+)\?[^\s)]+/g, "$1?[REDACTED]");
+	return text
+		.replaceAll(token, "[REDACTED]")
+		.replace(/(authorization\s*:\s*(?:bearer|bot)\s+)[^\s,;]+/gi, "$1[REDACTED]")
+		.replace(/(https?:\/\/[^\s/@:]+:)[^@\s/]+@/gi, "$1[REDACTED]@")
+		.replace(/(https?:\/\/[^\s?]+)\?[^\s)]+/g, "$1?[REDACTED]")
+		.replace(/\s+/g, " ")
+		.slice(0, 500);
 }
 
 async function settlesBefore(promise: Promise<void>, timeoutMs: number): Promise<boolean> {

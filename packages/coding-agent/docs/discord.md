@@ -72,6 +72,9 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS` | `30000` | Attachment download timeout. |
 | `PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS` | `1000` | Minimum delay between streamed Discord edits. |
 | `PRIME_DISCORD_PROGRESS_UPDATE_INTERVAL_MS` | `30000` | Interval between general working-status updates during a long-running turn; `0` disables them. |
+| `PRIME_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS` | `30000` | Periodic Discord Gateway WebSocket health sample; `0` disables the watchdog. |
+| `PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD` | `3` | Consecutive unhealthy WebSocket samples before a clean supervised restart. |
+| `PRIME_DISCORD_GATEWAY_MAX_PING_MS` | `30000` | Maximum accepted Discord Gateway heartbeat latency; `0` disables only the latency threshold. |
 | `PRIME_DISCORD_REGISTER_COMMANDS` | `true` | Register the gateway's global slash commands at startup. |
 | `PRIME_DISCORD_TOOL_PROGRESS` | `true` | Show general tool-progress updates while work is in progress. IPython calls are described only as workspace steps; arguments and reasoning remain hidden. |
 | `PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS` | `300000` | Maximum time to wait for a Discord response to an extension dialog. |
@@ -154,6 +157,8 @@ Planned parity work is deliberately separate from the scoped-read capability:
 ## Shutdown and diagnostics
 
 Press `Ctrl+C` or send `SIGTERM` for a graceful shutdown. The gateway stops accepting messages, drains active dispatches (aborting after the shutdown timeout), persists mappings, detaches resident sessions, and closes Discord.
+
+The bridge samples Discord's actual Gateway WebSocket manager, shard readiness, and heartbeat latency rather than treating REST availability as proof of inbound event delivery. Discord.js handles transient reconnects. After the configured number of unhealthy samples, the bridge drains and exits so its service supervisor can create one fresh client instead of leaving a stale client able to duplicate dispatch.
 
 If startup fails:
 

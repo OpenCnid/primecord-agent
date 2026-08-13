@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Client, MessageType } from "discord.js";
+import { type Client, MessageType, Status } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import type { DiscordAgentConnectionFactory } from "../../src/gateway/discord/agent-registry.js";
 import { DiscordBridge } from "../../src/gateway/discord/bridge.js";
@@ -32,6 +32,10 @@ function deferred<T>(): Deferred<T> {
 class FakeDiscordClient extends EventEmitter {
 	readonly user = { id: "bot-1", tag: "Prime Agent#0001" };
 	readonly application = null;
+	readonly ws = {
+		status: Status.Ready,
+		shards: new Map([[0, { status: Status.Ready, ping: 10 }]]),
+	};
 	readonly guilds = {
 		cache: new Map<
 			string,
@@ -51,6 +55,10 @@ class FakeDiscordClient extends EventEmitter {
 		private readonly destroyGate: Promise<void> = Promise.resolve(),
 	) {
 		super();
+	}
+
+	isReady(): boolean {
+		return this.ws.status === Status.Ready;
 	}
 
 	async login(token: string): Promise<string> {
@@ -99,6 +107,9 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		attachmentTimeoutMs: 30_000,
 		streamUpdateIntervalMs: 1_000,
 		progressUpdateIntervalMs: 30_000,
+		gatewayHealthCheckIntervalMs: 0,
+		gatewayHealthFailureThreshold: 3,
+		gatewayMaxPingMs: 30_000,
 		registerCommands: false,
 		toolProgress: true,
 		extensionUiTimeoutMs: 300_000,
@@ -366,6 +377,23 @@ describe("DiscordBridge lifecycle", () => {
 		destroyGate.resolve();
 		await expect(stopped).rejects.toThrow("Discord gateway session was invalidated and cannot reconnect");
 		expect(client.listenerCount("invalidated")).toBe(0);
+	});
+
+	it("stops for supervised recovery after sustained unhealthy Gateway heartbeat latency", async () => {
+		const client = new FakeDiscordClient();
+		const bridge = createBridge(client, {
+			gatewayHealthCheckIntervalMs: 5,
+			gatewayHealthFailureThreshold: 2,
+			gatewayMaxPingMs: 50,
+		});
+		await bridge.start();
+
+		client.ws.shards.get(0)!.ping = 51;
+		await expect(bridge.waitUntilStopped()).rejects.toThrow(
+			"Discord Gateway WebSocket remained unhealthy: heartbeat_latency",
+		);
+		expect(client.destroyCalls).toBe(1);
+		expect(client.listenerCount("shardDisconnect")).toBe(0);
 	});
 
 	it("acknowledges a role-authorized DM command before mutual-guild lookup completes", async () => {
@@ -689,6 +717,50 @@ describe("DiscordBridge lifecycle", () => {
 		await bridge.stop();
 	});
 
+	it("does not expose worker error details in a public terminal failure", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-private-failure.jsonl")),
+			[],
+		);
+		connection.rejectBusyPrompt = "Authorization: Bearer private-worker-secret";
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (payload: { content?: string }) => edits.push(payload)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "inspect the workspace",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, { reactions: false, streamUpdateIntervalMs: 0 }, factory);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() =>
+			expect(edits.at(-1)?.content).toBe(
+				"Prime Agent could not complete this request. Please try again or use /status.",
+			),
+		);
+		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("private-worker-secret");
+		await bridge.stop();
+	});
+
 	it("submits discovered commands as raw Prime Agent slash invocations", async () => {
 		const client = new FakeDiscordClient();
 		const connection = new FakeBridgeConnection(bridgeState(join(tmpdir(), "prime-discord-resource-session.jsonl")), [
@@ -829,7 +901,7 @@ describe("DiscordBridge lifecycle", () => {
 		await bridge.stop();
 	});
 
-	it("reports a missing terminal report as a failed Discord result instead of '(No response)'", async () => {
+	it("reports a missing terminal report as a generic failed Discord result instead of '(No response)'", async () => {
 		const client = new FakeDiscordClient();
 		const connection = new FakeBridgeConnection(
 			bridgeState(join(tmpdir(), "prime-discord-empty-terminal-session.jsonl")),
@@ -865,7 +937,9 @@ describe("DiscordBridge lifecycle", () => {
 
 		client.emit("messageCreate", message);
 		await vi.waitFor(() =>
-			expect(edits.at(-1)?.content).toContain("completed without a user-facing terminal report"),
+			expect(edits.at(-1)?.content).toBe(
+				"Prime Agent could not complete this request. Please try again or use /status.",
+			),
 		);
 
 		expect(connection.prompts[0]).toContain('<discord_task_envelope version="2">');
