@@ -1,0 +1,11 @@
+# See README for deployment assumptions. Replace public names only.
+pcg.example.com {
+	reverse_proxy 127.0.0.1:8787 {
+		header_up -Forwarded
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Host
+		header_up -X-Forwarded-Proto
+		header_up Forwarded "host=pcg.example.com;proto=https"
+		header_up Host "127.0.0.1:8787"
+	}
+}

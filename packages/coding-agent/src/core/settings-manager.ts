@@ -106,7 +106,15 @@ export type McpServerConfig =
 			oauth?: boolean;
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
+			/**
+			 * Explicit protocol compatibility opt-in. The released official SDK only
+			 * supports the legacy handshake protocol until a 2026-capable release is
+			 * available and conformance-tested.
+			 */
+			protocol?: "legacy-2025-11-25";
+			/** Exact tool names approved by the user after inspection. */
 			enabledTools?: string[];
+			/** Tool names that remain blocked even if listed in enabledTools. */
 			disabledTools?: string[];
 	  }
 	| {
@@ -114,7 +122,10 @@ export type McpServerConfig =
 			command: string;
 			args?: string[];
 			env?: Record<string, string>;
+			/** Explicit acknowledgement that the local command was reviewed and approved. */
+			approved?: boolean;
 			enabled?: boolean;
+			protocol?: "legacy-2025-11-25";
 			enabledTools?: string[];
 			disabledTools?: string[];
 	  };

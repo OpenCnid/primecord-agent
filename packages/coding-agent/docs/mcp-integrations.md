@@ -12,12 +12,58 @@ import linear
 issues = await linear.list_issues(team="Engineering")
 ```
 
-The MCP connection runs inside the kernel via the official `mcp` Python SDK. The
-host's only jobs are interactive login (browser OAuth) and minting/refreshing
+The legacy integrations connect inside the kernel via the official `mcp` Python SDK.
+The host handles interactive login (browser OAuth) and minting/refreshing
 credentials in `auth.json`.
+
+## Generic host-owned broker
+
+`prime_mcp` is the new generic path for administrator-configured MCP servers,
+including a **Primecord Private Context Gateway** deployment. The TypeScript host
+owns its connection and credentials; the kernel receives only a bounded tool
+inventory or tool result. No server-specific Python package is required:
+
+```python
+from prime_mcp import mcp
+
+pcg = mcp.server("pcg")
+tools = await pcg.list_tools()  # inspect untrusted descriptions/schemas first
+result = await pcg.call("primecord.memory.search", {"query": "release notes"})
+```
+
+The call is denied unless the server administrator explicitly placed the exact
+tool name in `enabledTools`. `disabledTools` always wins. Tool annotations such
+as `readOnlyHint` are not an approval mechanism.
+
+Configure the Private Context Gateway as a remote HTTPS endpoint; this is an
+outbound connector, not an exposure of the local daemon:
+
+```jsonc
+{
+  "mcpServers": {
+    "pcg": {
+      "type": "http",
+      "url": "https://pcg.example.invalid/mcp",
+      "oauth": true,
+      // Required until an official, conformance-tested 2026 SDK is released.
+      "protocol": "legacy-2025-11-25",
+      "enabledTools": ["primecord.memory.search", "primecord.memory.read"]
+    }
+  }
+}
+```
+
+The broker blocks non-HTTPS, loopback, private-network, credential-in-URL, and
+redirecting HTTP endpoints. It does not return OAuth or bearer tokens to the
+kernel. The currently released official TypeScript SDK supports the legacy
+`2025-11-25` handshake protocol, not `2026-07-28`; the compatibility flag is
+therefore explicit rather than pretending that legacy traffic is modern MCP.
+Do not enable `primecord.agent.ask` until a dedicated service-agent budget,
+tenant policy, and audit service exist.
 
 ## Table of Contents
 
+- [Generic host-owned broker](#generic-host-owned-broker)
 - [Using a built-in integration](#using-a-built-in-integration)
 - [How a call works](#how-a-call-works)
 - [Authoring your own integration](#authoring-your-own-integration)
