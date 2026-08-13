@@ -1,9 +1,11 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { type ConnectionOptions, connect as tlsConnect } from "node:tls";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Agent, fetch as undiciFetch } from "undici";
 
 export const LEGACY_MCP_PROTOCOL = "2025-11-25";
 export const LEGACY_MCP_PROTOCOL_CONFIG = "legacy-2025-11-25";
@@ -120,8 +122,13 @@ export class McpBroker {
 export class SdkMcpBrokerConnectionFactory implements McpBrokerConnectionFactory {
 	async open(server: McpBrokerServer): Promise<McpBrokerConnection> {
 		const client = new Client({ name: "prime-agent", version: "0.7.1" }, { capabilities: {} });
-		const transport = await createTransport(server);
-		await client.connect(transport);
+		const connection = await createTransport(server);
+		try {
+			await client.connect(connection.transport);
+		} catch (error) {
+			await connection.close();
+			throw error;
+		}
 		return {
 			async listTools(): Promise<readonly McpTool[]> {
 				const result = await client.listTools();
@@ -138,39 +145,101 @@ export class SdkMcpBrokerConnectionFactory implements McpBrokerConnectionFactory
 				return result;
 			},
 			async close(): Promise<void> {
-				await client.close();
+				try {
+					await client.close();
+				} finally {
+					await connection.close();
+				}
 			},
 		};
 	}
 }
 
-async function createTransport(server: McpBrokerServer): Promise<StreamableHTTPClientTransport | StdioClientTransport> {
+type BrokerTransport = {
+	transport: StreamableHTTPClientTransport | StdioClientTransport;
+	close: () => Promise<void>;
+};
+
+async function createTransport(server: McpBrokerServer): Promise<BrokerTransport> {
 	if (server.transport === "stdio") {
-		return new StdioClientTransport({
+		const transport = new StdioClientTransport({
 			command: server.command,
 			args: server.args ? [...server.args] : undefined,
 			env: server.env ? { ...server.env } : undefined,
 			stderr: "pipe",
 			maxBufferSize: MAX_JSON_BYTES,
 		});
+		return { transport, close: async () => {} };
 	}
 
-	const url = await validateRemoteUrl(server.url);
+	const endpoint = await resolveRemoteEndpoint(server.url);
+	const pinned = createPinnedFetch(endpoint);
 	const headers = new Headers(server.headers);
 	if (server.authorization) headers.set("Authorization", `Bearer ${server.authorization}`);
-	return new StreamableHTTPClientTransport(url, {
-		requestInit: { headers, redirect: "error" },
-		fetch: guardedFetch,
+	return {
+		transport: new StreamableHTTPClientTransport(endpoint.url, {
+			requestInit: { headers, redirect: "error" },
+			fetch: pinned.fetch,
+		}),
+		close: pinned.close,
+	};
+}
+
+type RemoteEndpoint = { url: URL; hostname: string; address: string };
+type PinnedFetch = { fetch: typeof fetch; close: () => Promise<void> };
+
+/**
+ * Pin every connection to an address that passed the private-network check
+ * instead of allowing fetch to resolve the hostname again. TLS still uses the
+ * original hostname for SNI and certificate validation, which prevents a
+ * DNS-rebinding endpoint from changing the peer after preflight validation.
+ */
+function createPinnedFetch(endpoint: RemoteEndpoint): PinnedFetch {
+	const dispatcher = new Agent({
+		connect: (options, callback) => {
+			if (options.hostname !== endpoint.hostname || options.protocol !== "https:") {
+				callback(new Error("MCP connection escaped its configured HTTPS endpoint"), null);
+				return;
+			}
+			const tlsOptions: ConnectionOptions = {
+				host: endpoint.address,
+				port: Number(options.port) || 443,
+				servername: endpoint.hostname,
+				ALPNProtocols: ["http/1.1"],
+				rejectUnauthorized: true,
+			};
+			const socket = tlsConnect(tlsOptions);
+			let settled = false;
+			const settleSuccess = () => {
+				if (settled) return;
+				settled = true;
+				callback(null, socket);
+			};
+			const settleError = (error: Error) => {
+				if (settled) return;
+				settled = true;
+				callback(error, null);
+			};
+			socket.once("secureConnect", settleSuccess);
+			socket.once("error", settleError);
+		},
 	});
+	return {
+		fetch: async (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
+			const url = new URL(input instanceof Request ? input.url : input.toString());
+			if (url.origin !== endpoint.url.origin) throw new Error("MCP request escaped its configured endpoint origin");
+			// `undici` and Node's built-in fetch types use distinct but runtime-compatible
+			// RequestInit declarations; preserve the host-facing fetch contract here.
+			return undiciFetch(
+				input as Parameters<typeof undiciFetch>[0],
+				{ ...init, dispatcher, redirect: "error" } as Parameters<typeof undiciFetch>[1],
+			) as Promise<Response>;
+		},
+		close: async () => dispatcher.destroy(),
+	};
 }
 
-async function guardedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
-	const url = new URL(input.toString());
-	await validateRemoteUrl(url.toString());
-	return fetch(input, { ...init, redirect: "error" });
-}
-
-async function validateRemoteUrl(rawUrl: string): Promise<URL> {
+async function resolveRemoteEndpoint(rawUrl: string): Promise<RemoteEndpoint> {
 	let url: URL;
 	try {
 		url = new URL(rawUrl);
@@ -180,18 +249,17 @@ async function validateRemoteUrl(rawUrl: string): Promise<URL> {
 	if (url.protocol !== "https:") throw new Error("MCP HTTP endpoint must use HTTPS");
 	if (url.username || url.password) throw new Error("MCP HTTP endpoint must not contain credentials");
 	const hostname = url.hostname.replace(/^\[|\]$/g, "");
-	if (hostname === "localhost" || isPrivateAddress(hostname)) {
+	if (hostname === "localhost" || isPrivateMcpAddress(hostname)) {
 		throw new Error("MCP HTTP endpoint must not target a private or loopback address");
 	}
 	const addresses = await lookup(hostname, { all: true, verbatim: true }).catch(() => []);
 	if (addresses.length === 0) throw new Error(`Could not resolve MCP endpoint host '${hostname}'`);
-	if (addresses.some((entry) => isPrivateAddress(entry.address))) {
-		throw new Error("MCP HTTP endpoint resolves to a private or loopback address");
-	}
-	return url;
+	const publicAddress = addresses.find((entry) => !isPrivateMcpAddress(entry.address));
+	if (!publicAddress) throw new Error("MCP HTTP endpoint resolves to a private or loopback address");
+	return { url, hostname, address: publicAddress.address };
 }
 
-function isPrivateAddress(address: string): boolean {
+export function isPrivateMcpAddress(address: string): boolean {
 	const version = isIP(address);
 	if (version === 4) {
 		const [first, second] = address.split(".").map(Number);
@@ -199,19 +267,25 @@ function isPrivateAddress(address: string): boolean {
 			first === 0 ||
 			first === 10 ||
 			first === 127 ||
+			(first === 100 && second !== undefined && second >= 64 && second <= 127) ||
 			(first === 169 && second === 254) ||
 			(first === 172 && second !== undefined && second >= 16 && second <= 31) ||
-			(first === 192 && second === 168) ||
-			first === 255
+			(first === 192 && (second === 0 || second === 168)) ||
+			(first === 198 && second !== undefined && (second === 18 || second === 19)) ||
+			first >= 224
 		);
 	}
 	if (version === 6) {
 		const normalized = address.toLowerCase();
+		const ipv4Mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized);
 		return (
+			normalized === "::" ||
 			normalized === "::1" ||
+			(ipv4Mapped !== null && isPrivateMcpAddress(ipv4Mapped[1])) ||
 			normalized.startsWith("fe80:") ||
 			normalized.startsWith("fc") ||
-			normalized.startsWith("fd")
+			normalized.startsWith("fd") ||
+			normalized.startsWith("ff")
 		);
 	}
 	return false;

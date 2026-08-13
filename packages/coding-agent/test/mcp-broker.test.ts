@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	isPrivateMcpAddress,
 	LEGACY_MCP_PROTOCOL_CONFIG,
 	McpBroker,
 	type McpBrokerConnectionFactory,
@@ -133,5 +134,31 @@ describe("SdkMcpBrokerConnectionFactory endpoint policy", () => {
 		await expect(factory.open({ ...server, url: "http://example.test/mcp" })).rejects.toThrow("must use HTTPS");
 		await expect(factory.open({ ...server, url: "https://127.0.0.1/mcp" })).rejects.toThrow("private or loopback");
 		await expect(factory.open({ ...server, url: "https://[::1]/mcp" })).rejects.toThrow("private or loopback");
+	});
+});
+
+describe("MCP endpoint IP policy", () => {
+	it("blocks private, special-use, and IPv4-mapped private addresses", () => {
+		for (const address of [
+			"0.0.0.0",
+			"10.0.0.1",
+			"100.64.0.1",
+			"127.0.0.1",
+			"169.254.1.1",
+			"172.16.0.1",
+			"192.0.2.1",
+			"192.168.0.1",
+			"198.18.0.1",
+			"224.0.0.1",
+			"::",
+			"::1",
+			"::ffff:127.0.0.1",
+			"fe80::1",
+			"fc00::1",
+			"ff02::1",
+		]) {
+			expect(isPrivateMcpAddress(address)).toBe(true);
+		}
+		expect(isPrivateMcpAddress("8.8.8.8")).toBe(false);
 	});
 });
