@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added bridge-owned Discord status heartbeats, a terminal-report worker contract, and final-message fallback delivery.
 - Added a secure Discord gateway with mention and thread routing, per-user persistent resident sessions, streaming responses, attachments, allowlists, and session-management slash commands.
 - Added permission-scoped Discord message-link and bounded-history reads for active Discord agent turns.
 - Added permission-scoped natural-language Discord thread creation for active agent turns.

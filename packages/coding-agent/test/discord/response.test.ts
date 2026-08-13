@@ -144,6 +144,30 @@ describe("DiscordResponseWriter", () => {
 		expect(channel.messages[0].edits.at(-1)?.content).toBe("Final response");
 	});
 
+	it("falls back to a standalone terminal response when receipt editing fails", async () => {
+		const channel = new FakeChannel();
+		const writer = await createDiscordResponseWriter(channel, { updateIntervalMs: 0 });
+		channel.messages[0].editError = new Error("receipt edit failed");
+
+		const result = await writer.finish("Final response");
+
+		expect(result.terminalDelivered).toBe(true);
+		expect(result.deliveryErrors).toHaveLength(1);
+		expect(channel.sends.map((send) => send.content)).toEqual(["…", "Final response"]);
+	});
+
+	it("reports an undelivered terminal response after every final path fails", async () => {
+		const channel = new FakeChannel();
+		const writer = await createDiscordResponseWriter(channel, { updateIntervalMs: 0 });
+		channel.messages[0].editError = new Error("receipt edit failed");
+		channel.sendError = new Error("standalone send failed");
+
+		const result = await writer.finish("Final response");
+
+		expect(result.terminalDelivered).toBe(false);
+		expect(result.deliveryErrors).toHaveLength(2);
+	});
+
 	it("finalizes long output into one edit and additional messages", async () => {
 		const channel = new FakeChannel();
 		const writer = await createDiscordResponseWriter(channel, { updateIntervalMs: 1_000 });
@@ -209,9 +233,10 @@ describe("DiscordResponseWriter", () => {
 
 		const result = await writer.finish("x".repeat(DISCORD_MESSAGE_LIMIT + 1));
 
-		expect(result.deliveryErrors).toEqual([editError, sendError]);
+		expect(result.deliveryErrors).toEqual([editError, sendError, sendError]);
+		expect(result.terminalDelivered).toBe(false);
 		expect(channel.messages[0].edits).toHaveLength(1);
-		expect(channel.sends).toHaveLength(2);
+		expect(channel.sends).toHaveLength(3);
 	});
 
 	it("retries the final output after a streamed edit fails", async () => {

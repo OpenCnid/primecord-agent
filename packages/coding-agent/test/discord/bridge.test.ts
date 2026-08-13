@@ -503,9 +503,10 @@ describe("DiscordBridge lifecycle", () => {
 			client.emit("messageCreate", message);
 			await vi.waitFor(() => expect(sends).toHaveLength(2));
 
-			expect(edits).toEqual([
-				{ content: "Here is the chart.\n\nAttached 1 file.", allowedMentions: { parse: [], repliedUser: false } },
-			]);
+			expect(edits.at(-1)).toEqual({
+				content: "Here is the chart.\n\nAttached 1 file.",
+				allowedMentions: { parse: [], repliedUser: false },
+			});
 			expect(sends[0]).toMatchObject({ content: "Prime Agent is working…" });
 			expect(sends[1]).toMatchObject({
 				files: [{ attachment: Buffer.from("chart bytes"), name: "chart.png" }],
@@ -825,6 +826,51 @@ describe("DiscordBridge lifecycle", () => {
 		expect(sends.map((payload) => payload.content).join("\n")).toContain("Run this command in a bot DM");
 		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("Private credential");
 		expect(sends.map((payload) => payload.content).join("\n")).not.toContain("sensitive-prefill");
+		await bridge.stop();
+	});
+
+	it("reports a missing terminal report as a failed Discord result instead of '(No response)'", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-empty-terminal-session.jsonl")),
+			[],
+		);
+		connection.lastAssistantText = "";
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (payload: { content?: string }) => edits.push(payload)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "inspect the workspace",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [] },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, { reactions: false, streamUpdateIntervalMs: 0 }, factory);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() =>
+			expect(edits.at(-1)?.content).toContain("completed without a user-facing terminal report"),
+		);
+
+		expect(connection.prompts[0]).toContain('<discord_task_envelope version="2">');
+		expect(connection.prompts[0]).toContain("<completion_checkpoint");
+		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("(No response)");
 		await bridge.stop();
 	});
 

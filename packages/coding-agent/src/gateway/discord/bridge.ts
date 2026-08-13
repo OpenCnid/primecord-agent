@@ -49,6 +49,7 @@ import {
 	presentDiscordExtensionUi,
 } from "./extension-ui.js";
 import { type DiscordOutboundMedia, extractDiscordMedia, loadDiscordOutboundMedia } from "./outbound-media.js";
+import { buildDiscordTurnPrompt, DISCORD_WORKER_SYSTEM_SCAFFOLD } from "./prompt.js";
 import {
 	DiscordReadAdapterError,
 	type DiscordReadChannel,
@@ -168,6 +169,7 @@ class DiscordProgressReporter {
 		private readonly writer: DiscordResponseWriter,
 		updateIntervalMs: number,
 	) {
+		this.publish(true);
 		if (updateIntervalMs > 0) {
 			this.timer = setInterval(() => this.publish(true), updateIntervalMs);
 		}
@@ -201,7 +203,7 @@ class DiscordProgressReporter {
 	private publish(includeHeartbeat: boolean): void {
 		const activity =
 			this.connectionActivity ?? [...this.activeToolLabels.values()].at(-1) ?? "Prime Agent is working.";
-		const elapsedSeconds = Math.max(1, Math.floor((Date.now() - this.startedAt) / 1_000));
+		const elapsedSeconds = Math.max(0, Math.floor((Date.now() - this.startedAt) / 1_000));
 		const message = includeHeartbeat ? `${activity} Still working (${elapsedSeconds}s elapsed).` : activity;
 		this.writer.setProgress(`_${message}_`);
 	}
@@ -263,7 +265,11 @@ export class DiscordBridge {
 			agentDir: options.agentDir,
 			sessionRoot: config.sessionDir,
 			socketPath: options.socketPath,
-			runtimeConfig: { discordGatewayRead: true, discordGatewayThreadCreation: true },
+			runtimeConfig: {
+				discordGatewayRead: true,
+				discordGatewayThreadCreation: true,
+				appendSystemPrompt: [DISCORD_WORKER_SYSTEM_SCAFFOLD],
+			},
 			connectionFactory: options.connectionFactory,
 			eventListener: this.onRegistryConnectionEvent,
 		});
@@ -572,11 +578,12 @@ export class DiscordBridge {
 				),
 			);
 			const finalText =
-				streamedText ||
+				nonEmptyText(streamedText) ??
 				(invocation?.command.source === "extension"
 					? "Prime Agent extension command completed."
 					: await connection.getLastAssistantText());
-			const extractedMedia = extractDiscordMedia(finalText ?? "");
+			const terminalReport = requireTerminalReport(finalText);
+			const extractedMedia = extractDiscordMedia(terminalReport);
 			const outboundMedia = await loadDiscordOutboundMedia(extractedMedia.paths, {
 				cwd: this.config.cwd,
 				maxAttachments: this.config.maxOutboundAttachments,
@@ -590,10 +597,9 @@ export class DiscordBridge {
 			// Clear the bridge-owned status before replacing the receipt with the terminal response.
 			progressReporter?.stop();
 			progressReporter = undefined;
-			const deliveryErrorsBeforeFinish = writer.deliveryErrors.length;
 			const result = await writer.finish(responseText);
 			writerFinalized = true;
-			if (result.deliveryErrors.length > deliveryErrorsBeforeFinish) {
+			if (!result.terminalDelivered) {
 				throw new Error("Discord could not deliver the complete response");
 			}
 			await sendDiscordMedia(targetChannel, outboundMedia.attachments);
@@ -604,7 +610,12 @@ export class DiscordBridge {
 				? "Prime Agent already has work in progress or queued. This message was not submitted; please send it again once the session is idle."
 				: `Prime Agent failed: ${safeErrorMessage(error, this.config.botToken)}`;
 			if (writer && !writerFinalized) {
-				await writer.fail(failureText).catch(() => safeSend(targetChannel, failureText));
+				const delivered = await writer
+					.fail(failureText)
+					.then((result) => result.terminalDelivered)
+					.catch(() => false);
+				writerFinalized = true;
+				if (!delivered) await safeSend(targetChannel, failureText);
 			} else {
 				await safeSend(targetChannel, failureText);
 			}
@@ -627,13 +638,13 @@ export class DiscordBridge {
 		const content = stripBotMention(message.content, botUserId);
 		const history = await this.historyContext(message, botUserId, decision);
 		const authorName = message.member?.displayName ?? message.author.username;
-		const sections = [
-			`[Discord message from ${authorName} (${message.author.id})]`,
+		return buildDiscordTurnPrompt({
+			authorName,
+			authorId: message.author.id,
+			request: content || (attachmentNotes.length > 0 ? "Please inspect the attached files." : "Please respond."),
 			history,
-			content || (attachmentNotes.length > 0 ? "Please inspect the attached files." : "Please respond."),
-			...attachmentNotes,
-		].filter((section): section is string => Boolean(section));
-		return sections.join("\n\n");
+			attachmentNotes,
+		});
 	}
 
 	private async historyContext(
@@ -1566,6 +1577,16 @@ function isUnsubmittedBusyPromptError(error: unknown): boolean {
 function textDelta(event: AgentConnectionEvent): string | undefined {
 	if (event.type !== "session_event" || event.event.type !== "message_update") return undefined;
 	return event.event.assistantMessageEvent.type === "text_delta" ? event.event.assistantMessageEvent.delta : undefined;
+}
+
+function nonEmptyText(value: string | undefined): string | undefined {
+	return value?.trim() ? value : undefined;
+}
+
+function requireTerminalReport(value: string | undefined): string {
+	const report = nonEmptyText(value);
+	if (!report) throw new Error("Prime Agent completed without a user-facing terminal report");
+	return report;
 }
 
 function progressLabel(toolName: string): string {
