@@ -10,6 +10,7 @@ import {
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
+import { LEGACY_MCP_PROTOCOL_CONFIG, McpBroker, type McpBrokerServer } from "./mcp-broker.js";
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -29,6 +30,12 @@ interface ResolvedIntegration {
 	enabled?: boolean;
 	/** Extra static HTTP headers from the user config. */
 	headers?: Record<string, string>;
+	/** Explicit protocol compatibility opt-in for the generic broker. */
+	protocol?: "legacy-2025-11-25";
+	/** Exact user-approved tools. All tool calls are denied if this is unset. */
+	enabledTools?: readonly string[];
+	/** Tools blocked even if they are present in enabledTools. */
+	disabledTools?: readonly string[];
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
 }
@@ -38,6 +45,7 @@ export class McpManager {
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
 	private readonly beginLogin?: (server: string) => Promise<void>;
 	private integrations = new Map<string, ResolvedIntegration>();
+	private readonly broker: McpBroker;
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
 	private registeredUserProviderIds = new Set<string>();
 
@@ -47,6 +55,7 @@ export class McpManager {
 		this.beginLogin = options.beginLogin;
 		this.resolveIntegrations();
 		this.registerProviders();
+		this.broker = new McpBroker((server) => this.resolveBrokerServer(server));
 	}
 
 	/** Re-read settings and re-register providers; call after a session reload. */
@@ -70,7 +79,7 @@ export class McpManager {
 			});
 		}
 		for (const [server, config] of Object.entries(this.getUserServers() ?? {})) {
-			if (config.type !== "http") continue; // stdio servers self-manage in Python
+			if (config.type !== "http") continue; // stdio needs a separately approved broker path
 			integrations.set(server, {
 				server,
 				label: server,
@@ -79,6 +88,9 @@ export class McpManager {
 				bearerTokenEnvVar: config.bearerTokenEnvVar,
 				enabled: config.enabled,
 				headers: config.headers,
+				protocol: config.protocol,
+				enabledTools: config.enabledTools,
+				disabledTools: config.disabledTools,
 				userDeclared: true,
 			});
 		}
@@ -140,6 +152,66 @@ export class McpManager {
 		return cred !== undefined;
 	}
 
+	/**
+	 * Resolve a kernel request into a host-only broker descriptor. Credentials are
+	 * fetched only after the name has resolved to the currently configured endpoint
+	 * and never cross the Jupyter comm boundary.
+	 */
+	private async resolveBrokerServer(server: string): Promise<McpBrokerServer | undefined> {
+		const userConfig = this.getUserServers()?.[server];
+		if (userConfig?.type === "stdio") {
+			if (userConfig.enabled === false) throw new Error(`MCP server '${server}' is disabled`);
+			if (userConfig.approved !== true) {
+				throw new Error(`Local MCP server '${server}' requires explicit command approval`);
+			}
+			if (!userConfig.protocol) {
+				throw new Error(
+					`Local MCP server '${server}' must explicitly set protocol '${LEGACY_MCP_PROTOCOL_CONFIG}'`,
+				);
+			}
+			return {
+				name: server,
+				transport: "stdio",
+				command: userConfig.command,
+				args: userConfig.args,
+				env: userConfig.env,
+				approved: true,
+				approvedTools: userConfig.enabledTools,
+				blockedTools: userConfig.disabledTools,
+				protocol: userConfig.protocol,
+			};
+		}
+
+		const integration = this.integrations.get(server);
+		if (!integration) return undefined;
+		if (integration.enabled === false) throw new Error(`MCP server '${server}' is disabled`);
+		if (!integration.protocol) {
+			throw new Error(`MCP server '${server}' must explicitly set protocol '${LEGACY_MCP_PROTOCOL_CONFIG}'`);
+		}
+		if (hasCredentialHeader(integration.headers)) {
+			throw new Error(`MCP server '${server}' must use OAuth or bearerTokenEnvVar, not an Authorization header`);
+		}
+
+		let authorization: string | undefined;
+		if (integration.bearerTokenEnvVar) {
+			authorization = process.env[integration.bearerTokenEnvVar]?.trim() || undefined;
+		} else if (!(integration.userDeclared && getCatalogEntry(integration.server))) {
+			authorization = await this.authStorage.getApiKey(this.providerId(integration.server), {
+				includeFallback: false,
+			});
+		}
+		return {
+			name: server,
+			transport: "http",
+			url: integration.url,
+			headers: integration.headers,
+			authorization,
+			approvedTools: integration.enabledTools,
+			blockedTools: integration.disabledTools,
+			protocol: integration.protocol,
+		};
+	}
+
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */
 	getDisabledBuiltinSkillOverrides(): string[] {
 		const overrides: string[] = [];
@@ -178,6 +250,16 @@ export class McpManager {
 				}
 				return config;
 			},
+			"mcp.list_tools": async (payload) => ({
+				tools: await this.broker.listTools(requiredPayloadString(payload, "server", "mcp.list_tools")),
+			}),
+			"mcp.call_tool": async (payload) => ({
+				result: await this.broker.callTool(
+					requiredPayloadString(payload, "server", "mcp.call_tool"),
+					requiredPayloadString(payload, "tool", "mcp.call_tool"),
+					recordPayload(payload.arguments, "mcp.call_tool arguments"),
+				),
+			}),
 		};
 		// Only expose begin_login when an interactive login is actually wired, so the
 		// kernel doesn't get a handler whose only behavior is to throw.
@@ -202,4 +284,19 @@ export class McpManager {
 			usesOAuth: integration.usesOAuth,
 		}));
 	}
+}
+
+function requiredPayloadString(payload: Record<string, unknown>, key: string, operation: string): string {
+	const value = payload[key];
+	if (typeof value !== "string" || !value.trim()) throw new Error(`${operation} requires a non-empty ${key}`);
+	return value.trim();
+}
+
+function recordPayload(value: unknown, label: string): Record<string, unknown> {
+	if (!value || Array.isArray(value) || typeof value !== "object") throw new Error(`${label} must be an object`);
+	return value as Record<string, unknown>;
+}
+
+function hasCredentialHeader(headers: Record<string, string> | undefined): boolean {
+	return Object.keys(headers ?? {}).some((name) => /^(authorization|proxy-authorization)$/i.test(name));
 }

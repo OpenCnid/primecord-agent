@@ -75,7 +75,7 @@ describe("McpManager", () => {
 	it("exposes only mcp.refresh when no interactive login is wired", async () => {
 		const manager = new McpManager({ authStorage });
 		const handlers = manager.hostHandlers();
-		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
+		expect(Object.keys(handlers).sort()).toEqual(["mcp.call_tool", "mcp.config", "mcp.list_tools", "mcp.refresh"]);
 
 		// refresh with no credentials fails (so the kernel reports a refresh error,
 		// not a false success), and a missing server arg is rejected.
@@ -92,7 +92,13 @@ describe("McpManager", () => {
 			},
 		});
 		const handlers = manager.hostHandlers();
-		expect(Object.keys(handlers).sort()).toEqual(["mcp.begin_login", "mcp.config", "mcp.refresh"]);
+		expect(Object.keys(handlers).sort()).toEqual([
+			"mcp.begin_login",
+			"mcp.call_tool",
+			"mcp.config",
+			"mcp.list_tools",
+			"mcp.refresh",
+		]);
 		await handlers["mcp.begin_login"]({ server: "linear" });
 		expect(called).toBe("linear");
 	});
