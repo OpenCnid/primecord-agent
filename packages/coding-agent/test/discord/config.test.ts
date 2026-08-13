@@ -43,6 +43,9 @@ describe("loadDiscordConfig", () => {
 			attachmentTimeoutMs: 30_000,
 			streamUpdateIntervalMs: 1_000,
 			progressUpdateIntervalMs: 30_000,
+			gatewayHealthCheckIntervalMs: 30_000,
+			gatewayHealthFailureThreshold: 3,
+			gatewayMaxPingMs: 30_000,
 			registerCommands: true,
 			toolProgress: true,
 			extensionUiTimeoutMs: 300_000,
@@ -82,6 +85,9 @@ describe("loadDiscordConfig", () => {
 			PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS: "1234",
 			PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS: "250",
 			PRIME_DISCORD_PROGRESS_UPDATE_INTERVAL_MS: "5000",
+			PRIME_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS: "60000",
+			PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD: "4",
+			PRIME_DISCORD_GATEWAY_MAX_PING_MS: "2000",
 			PRIME_DISCORD_REGISTER_COMMANDS: "false",
 			PRIME_DISCORD_TOOL_PROGRESS: "false",
 			PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS: "4321",
@@ -119,6 +125,9 @@ describe("loadDiscordConfig", () => {
 			attachmentTimeoutMs: 1_234,
 			streamUpdateIntervalMs: 250,
 			progressUpdateIntervalMs: 5_000,
+			gatewayHealthCheckIntervalMs: 60_000,
+			gatewayHealthFailureThreshold: 4,
+			gatewayMaxPingMs: 2_000,
 			registerCommands: false,
 			toolProgress: false,
 			extensionUiTimeoutMs: 4_321,
@@ -150,6 +159,12 @@ describe("loadDiscordConfig", () => {
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS: "0" })).toThrow(
 			"PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS must be a positive integer",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD: "0" })).toThrow(
+			"PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD must be a positive integer",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_GATEWAY_MAX_PING_MS: "600001" })).toThrow(
+			"PRIME_DISCORD_GATEWAY_MAX_PING_MS must not exceed 600000",
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOWED_USERS: "123,not-an-id" })).toThrow(
 			"PRIME_DISCORD_ALLOWED_USERS must contain comma-separated Discord IDs",

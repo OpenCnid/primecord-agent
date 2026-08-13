@@ -32,6 +32,12 @@ export interface DiscordBridgeConfig {
 	attachmentTimeoutMs: number;
 	streamUpdateIntervalMs: number;
 	progressUpdateIntervalMs: number;
+	/** Periodic Gateway WebSocket health sampling; 0 disables the watchdog. */
+	gatewayHealthCheckIntervalMs: number;
+	/** Consecutive unhealthy samples required before the bridge exits for supervised recovery. */
+	gatewayHealthFailureThreshold: number;
+	/** Maximum accepted Gateway heartbeat round-trip time; 0 disables the latency threshold. */
+	gatewayMaxPingMs: number;
 	registerCommands: boolean;
 	toolProgress: boolean;
 	extensionUiTimeoutMs: number;
@@ -56,6 +62,16 @@ const MAX_DISCORD_READ_MESSAGES = 100;
 const MAX_DISCORD_READ_CONTENT_CHARS = 10_000;
 const MAX_DISCORD_READ_TOTAL_CONTENT_CHARS = 50_000;
 const MAX_DISCORD_READ_ATTACHMENTS = 25;
+
+// Gateway WebSocket checks are deliberately conservative: discord.js handles short
+// reconnects itself; only a sustained unhealthy state asks the process supervisor
+// for a clean replacement.
+export const DEFAULT_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS = 30_000;
+export const DEFAULT_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD = 3;
+export const DEFAULT_DISCORD_GATEWAY_MAX_PING_MS = 30_000;
+const MAX_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS = 10 * 60_000;
+const MAX_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD = 100;
+const MAX_DISCORD_GATEWAY_MAX_PING_MS = 10 * 60_000;
 
 function readRequired(env: DiscordEnvironment, name: string): string {
 	const value = env[name]?.trim();
@@ -101,6 +117,17 @@ function readBoundedPositiveInteger(
 	maximum: number,
 ): number {
 	const parsed = readPositiveInteger(env, name, defaultValue);
+	if (parsed > maximum) throw new Error(`${name} must not exceed ${maximum}`);
+	return parsed;
+}
+
+function readBoundedNonNegativeInteger(
+	env: DiscordEnvironment,
+	name: string,
+	defaultValue: number,
+	maximum: number,
+): number {
+	const parsed = readNonNegativeInteger(env, name, defaultValue);
 	if (parsed > maximum) throw new Error(`${name} must not exceed ${maximum}`);
 	return parsed;
 }
@@ -191,6 +218,24 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		attachmentTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_ATTACHMENT_TIMEOUT_MS", 30_000),
 		streamUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_STREAM_UPDATE_INTERVAL_MS", 1_000),
 		progressUpdateIntervalMs: readNonNegativeInteger(env, "PRIME_DISCORD_PROGRESS_UPDATE_INTERVAL_MS", 30_000),
+		gatewayHealthCheckIntervalMs: readBoundedNonNegativeInteger(
+			env,
+			"PRIME_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS",
+			DEFAULT_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS,
+			MAX_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS,
+		),
+		gatewayHealthFailureThreshold: readBoundedPositiveInteger(
+			env,
+			"PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD",
+			DEFAULT_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD,
+			MAX_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD,
+		),
+		gatewayMaxPingMs: readBoundedNonNegativeInteger(
+			env,
+			"PRIME_DISCORD_GATEWAY_MAX_PING_MS",
+			DEFAULT_DISCORD_GATEWAY_MAX_PING_MS,
+			MAX_DISCORD_GATEWAY_MAX_PING_MS,
+		),
 		registerCommands: readBoolean(env, "PRIME_DISCORD_REGISTER_COMMANDS", true),
 		toolProgress: readBoolean(env, "PRIME_DISCORD_TOOL_PROGRESS", true),
 		extensionUiTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS", 300_000),
