@@ -36,7 +36,7 @@ prime-agent gateway discord --cwd /srv/prime-workspace
 
 `DISCORD_BOT_TOKEN` is accepted as a CLI compatibility fallback. `PRIME_DISCORD_BOT_TOKEN` takes precedence.
 
-Discord identifiers are strings of decimal digits. Turn on Developer Mode in Discord, then use **Copy User ID**, **Copy Role ID**, or **Copy Channel ID**.
+Discord identifiers are strings of decimal digits. Turn on Developer Mode in Discord, then use **Copy User ID**, **Copy Role ID**, **Copy Server ID**, or **Copy Channel ID**.
 
 ## Environment reference
 
@@ -48,7 +48,8 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_ALLOWED_USERS` | empty | Users allowed to use messages and commands. |
 | `PRIME_DISCORD_ALLOWED_ROLES` | empty | Server roles allowed to use the bot. In DMs, mutual guild memberships are checked. |
 | `PRIME_DISCORD_ALLOW_ALL_USERS` | `false` | Explicitly authorize every user. Use with care. |
-| `PRIME_DISCORD_ALLOWED_CHANNELS` | empty | Restrict use to these server channels. Threads inherit their parent channel policy. |
+| `PRIME_DISCORD_ALLOWED_GUILDS` | empty | Restrict server traffic to these guilds before evaluating channel policy. DMs are unaffected; this setting does not authorize users by itself. |
+| `PRIME_DISCORD_ALLOWED_CHANNELS` | empty | Restrict use to these server channels after the guild filter. Threads inherit their parent channel policy. |
 | `PRIME_DISCORD_IGNORED_CHANNELS` | empty | Deny these channels; this takes precedence over all allows. |
 | `PRIME_DISCORD_FREE_RESPONSE_CHANNELS` | empty | Respond without a bot mention in these channels and their threads; admitted parent messages start daughter threads when auto-threading is enabled. |
 | `PRIME_DISCORD_NO_THREAD_CHANNELS` | empty | Reply in place instead of creating a thread. This explicitly opts those parent channels out of daughter-thread isolation. |
@@ -82,7 +83,7 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_SESSION_DIR` | `~/.prime/agent/discord/sessions` | Discord-to-Prime session mapping and transcript root. |
 | `PRIME_DISCORD_CACHE_DIR` | `~/.prime/agent/discord/cache` | Temporary inbound attachment cache. |
 
-When both identity and channel allowlists are configured, both checks must pass. An ignored channel always wins. Authorization happens before attachment downloads, thread creation, or Prime session creation.
+When configured, the guild allowlist is checked before channel and identity policy. When both identity and channel allowlists are configured, both checks must pass. An ignored channel always wins after the guild check. Authorization happens before attachment downloads, thread creation, or Prime session creation.
 
 ## Sessions and concurrency
 
@@ -102,7 +103,7 @@ Discord-created agent turns expose a `discord_read` tool. It is a gateway capabi
 - “Inspect `https://discord.com/channels/...`” lets the agent use `action: "message"` with that exact Discord message URL.
 - “Read the last 20 messages in this thread” lets the agent use `action: "history", limit: 20` with the current channel or thread.
 
-Every tool call rechecks the initiating user, current guild, channel policy, thread parent policy, and the user's view permission before Discord message data is fetched. A DM can read only its current DM. A server request can read its current channel or thread; another channel must be in the same guild and have its **parent channel** explicitly listed in `PRIME_DISCORD_ALLOWED_CHANNELS`. Ignored parents always win, and a direct thread allowlist entry never bypasses its parent policy. With no channel allowlist, cross-channel reads are disabled even for otherwise authorized identities.
+Every tool call rechecks the initiating user, current guild allowlist, channel policy, thread parent policy, and the user's view permission before Discord message data is fetched. A DM can read only its current DM. A server request can read its current channel or thread; another channel must be in the same guild and have its **parent channel** explicitly listed in `PRIME_DISCORD_ALLOWED_CHANNELS`. Ignored parents always win, and a direct thread allowlist entry never bypasses its parent policy. With no channel allowlist, cross-channel reads are disabled even for otherwise authorized identities.
 
 The tool accepts only `https://discord.com/channels/<guild-or-@me>/<channel>/<message>` URLs with decimal Discord IDs. It rejects query strings, fragments, credentials, ports, malformed links, other guilds, deleted targets, missing permissions, and forbidden targets with stable user-facing errors. History has no cursor or pagination, so it cannot enumerate unrestricted server history.
 
@@ -112,7 +113,7 @@ Returned data is normalized and marked untrusted: IDs, timestamp, basic author f
 
 Discord-created agent turns also expose `discord_create_thread` when a user explicitly asks to create a thread in natural language. It accepts only a short title and can create one public thread in the current authorized server text or announcement channel. When invoked from an existing thread, it can create only a sibling under that thread's canonical parent. It cannot select another guild or channel, create nested threads, create threads from DMs, add members, or manage existing channels.
 
-Every call rechecks the initiating user's gateway policy, parent-channel policy, and Discord permissions to view the channel, send messages, and create public threads. The daemon never receives the bot token; it gets only a bounded request and normalized thread ID, name, and URL. Background jobs and RLM subagents cannot create threads through this capability.
+Every call rechecks the initiating user's gateway policy, guild allowlist, parent-channel policy, and Discord permissions to view the channel, send messages, and create public threads. The daemon never receives the bot token; it gets only a bounded request and normalized thread ID, name, and URL. Background jobs and RLM subagents cannot create threads through this capability.
 
 ## Commands
 

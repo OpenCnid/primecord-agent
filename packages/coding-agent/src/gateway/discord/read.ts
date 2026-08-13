@@ -6,7 +6,7 @@ import {
 	type DiscordGatewayReadResponse,
 	discordGatewayReadFailure,
 } from "../../core/discord-gateway-read.js";
-import type { DiscordRoutingPolicy } from "./routing.js";
+import { type DiscordRoutingPolicy, isAllowedGuild } from "./routing.js";
 
 const DISCORD_MESSAGE_URL_HOSTS = new Set(["discord.com"]);
 const DISCORD_SNOWFLAKE_PATTERN = /^\d{17,20}$/;
@@ -159,6 +159,9 @@ export class DiscordReadService {
 	}
 
 	private async resolveTarget(scope: DiscordReadScope, input: DiscordGatewayReadRequest): Promise<DiscordReadChannel> {
+		if (scope.kind !== "dm" && !isAllowedGuild(this.policy, scope.guildId)) {
+			throw forbidden("This Discord guild is not authorized by gateway policy.");
+		}
 		let channelId: string;
 		if (input.action === "message") {
 			const parsed = parseDiscordMessageUrl(input.messageUrl ?? "");

@@ -7,6 +7,7 @@ function policy(overrides: Partial<DiscordRoutingPolicy> = {}): DiscordRoutingPo
 		allowedUsers: ["user-1"],
 		allowedRoles: [],
 		allowAllUsers: false,
+		allowedGuilds: [],
 		allowedChannels: [],
 		ignoredChannels: [],
 		freeResponseChannels: [],
@@ -24,6 +25,7 @@ function message(overrides: Partial<DiscordMessageRouteInput> = {}): DiscordMess
 	return {
 		kind: "guild",
 		channelId: "channel-1",
+		guildId: "guild-1",
 		authorId: "user-1",
 		authorIsBot: false,
 		mentionsBot: true,
@@ -50,7 +52,31 @@ describe("routeMessage", () => {
 		});
 	});
 
-	it("applies ignored, channel, and authorization policy before mention policy", () => {
+	it("filters guild traffic before channel policy without restricting DMs", () => {
+		const guildRestricted = policy({ allowedGuilds: ["guild-1"], allowedChannels: ["channel-1"] });
+		expect(routeMessage(message(), guildRestricted)).toMatchObject({ action: "respond" });
+		expect(routeMessage(message({ guildId: "guild-2" }), guildRestricted)).toEqual({
+			action: "ignore",
+			reason: "guild_not_allowed",
+		});
+		expect(routeMessage(message({ kind: "dm", guildId: undefined, mentionsBot: false }), guildRestricted)).toEqual({
+			action: "respond",
+			reason: "direct_message",
+			createThread: false,
+		});
+	});
+
+	it("applies guild, ignored, channel, and authorization policy before mention policy", () => {
+		const guildRestricted = policy({ allowedGuilds: ["guild-2"], ignoredChannels: ["channel-1"] });
+		expect(routeMessage(message(), guildRestricted)).toEqual({
+			action: "ignore",
+			reason: "guild_not_allowed",
+		});
+		expect(routeMessage(message({ guildId: undefined }), guildRestricted)).toEqual({
+			action: "ignore",
+			reason: "guild_not_allowed",
+		});
+
 		const ignored = policy({ ignoredChannels: ["channel-1"], allowedUsers: [] });
 		expect(routeMessage(message({ mentionsBot: true }), ignored)).toEqual({
 			action: "ignore",

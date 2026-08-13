@@ -8,6 +8,7 @@ export interface DiscordBridgeConfig {
 	allowedUsers: readonly string[];
 	allowedRoles: readonly string[];
 	allowAllUsers: boolean;
+	allowedGuilds: readonly string[];
 	allowedChannels: readonly string[];
 	ignoredChannels: readonly string[];
 	freeResponseChannels: readonly string[];
@@ -170,6 +171,7 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 		allowedUsers: readIdList(env, "PRIME_DISCORD_ALLOWED_USERS"),
 		allowedRoles: readIdList(env, "PRIME_DISCORD_ALLOWED_ROLES"),
 		allowAllUsers: readBoolean(env, "PRIME_DISCORD_ALLOW_ALL_USERS", false),
+		allowedGuilds: readIdList(env, "PRIME_DISCORD_ALLOWED_GUILDS"),
 		allowedChannels: readIdList(env, "PRIME_DISCORD_ALLOWED_CHANNELS"),
 		ignoredChannels: readIdList(env, "PRIME_DISCORD_IGNORED_CHANNELS"),
 		freeResponseChannels: readIdList(env, "PRIME_DISCORD_FREE_RESPONSE_CHANNELS"),

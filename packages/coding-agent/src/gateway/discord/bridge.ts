@@ -1553,6 +1553,7 @@ function messageRouteInput(
 	return {
 		kind,
 		channelId: message.channelId,
+		...(message.guildId ? { guildId: message.guildId } : {}),
 		parentChannelId: message.channel.isThread() ? (message.channel.parentId ?? undefined) : undefined,
 		authorId: message.author.id,
 		authorRoleIds,
@@ -1572,6 +1573,7 @@ function interactionRouteInput(
 	return {
 		kind,
 		channelId: interaction.channelId,
+		...(interaction.guildId ? { guildId: interaction.guildId } : {}),
 		parentChannelId: interaction.channel?.isThread() ? (interaction.channel.parentId ?? undefined) : undefined,
 		authorId: interaction.user.id,
 		authorRoleIds,

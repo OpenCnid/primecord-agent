@@ -19,6 +19,7 @@ describe("loadDiscordConfig", () => {
 			allowedUsers: [],
 			allowedRoles: [],
 			allowAllUsers: false,
+			allowedGuilds: [],
 			allowedChannels: [],
 			ignoredChannels: [],
 			freeResponseChannels: [],
@@ -61,6 +62,7 @@ describe("loadDiscordConfig", () => {
 			PRIME_DISCORD_ALLOWED_USERS: "100, 200,100,",
 			PRIME_DISCORD_ALLOWED_ROLES: "300",
 			PRIME_DISCORD_ALLOW_ALL_USERS: "YES",
+			PRIME_DISCORD_ALLOWED_GUILDS: "350, 360,350,",
 			PRIME_DISCORD_ALLOWED_CHANNELS: "400, 500",
 			PRIME_DISCORD_IGNORED_CHANNELS: "600",
 			PRIME_DISCORD_FREE_RESPONSE_CHANNELS: "700",
@@ -101,6 +103,7 @@ describe("loadDiscordConfig", () => {
 			allowedUsers: ["100", "200"],
 			allowedRoles: ["300"],
 			allowAllUsers: true,
+			allowedGuilds: ["350", "360"],
 			allowedChannels: ["400", "500"],
 			ignoredChannels: ["600"],
 			freeResponseChannels: ["700"],
@@ -168,6 +171,9 @@ describe("loadDiscordConfig", () => {
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOWED_USERS: "123,not-an-id" })).toThrow(
 			"PRIME_DISCORD_ALLOWED_USERS must contain comma-separated Discord IDs",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOWED_GUILDS: "123,not-an-id" })).toThrow(
+			"PRIME_DISCORD_ALLOWED_GUILDS must contain comma-separated Discord IDs",
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOW_BOTS: "trusted" })).toThrow(
 			"PRIME_DISCORD_ALLOW_BOTS must be one of: none, mentions, all",

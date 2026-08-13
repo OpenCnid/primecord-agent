@@ -21,6 +21,7 @@ function policy(overrides: Partial<DiscordRoutingPolicy> = {}): DiscordRoutingPo
 		allowedUsers: [USER],
 		allowedRoles: [],
 		allowAllUsers: false,
+		allowedGuilds: [],
 		allowedChannels: [],
 		ignoredChannels: [],
 		freeResponseChannels: [],
@@ -124,6 +125,9 @@ describe("DiscordThreadCreationService", () => {
 				scope({ kind: "thread", channelId: THREAD }),
 				request,
 			),
+		).resolves.toMatchObject({ ok: false, code: "FORBIDDEN" });
+		await expect(
+			service(channels, { policy: policy({ allowedGuilds: ["200000000000000001"] }) }).create(scope(), request),
 		).resolves.toMatchObject({ ok: false, code: "FORBIDDEN" });
 		await expect(
 			service(channels, { policy: policy({ ignoredChannels: [CHANNEL] }) }).create(scope(), request),

@@ -25,6 +25,7 @@ function policy(overrides: Partial<DiscordRoutingPolicy> = {}): DiscordRoutingPo
 		allowedUsers: [USER],
 		allowedRoles: [],
 		allowAllUsers: false,
+		allowedGuilds: [],
 		allowedChannels: [],
 		ignoredChannels: [],
 		freeResponseChannels: [],
@@ -199,6 +200,9 @@ describe("DiscordReadService", () => {
 				action: "message",
 				messageUrl: `https://discord.com/channels/${OTHER_GUILD}/${CHANNEL}/${MESSAGE}`,
 			}),
+		).resolves.toMatchObject({ ok: false, code: "FORBIDDEN" });
+		await expect(
+			service(adapter, { policy: policy({ allowedGuilds: [OTHER_GUILD] }) }).read(scope(), { action: "history" }),
 		).resolves.toMatchObject({ ok: false, code: "FORBIDDEN" });
 		await expect(
 			service(adapter, { policy: policy({ ignoredChannels: [CHANNEL] }) }).read(scope(), {

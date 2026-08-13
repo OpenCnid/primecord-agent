@@ -4,7 +4,7 @@ import {
 	type DiscordGatewayThreadCreationResponse,
 	discordGatewayThreadCreationFailure,
 } from "../../core/discord-gateway-thread.js";
-import type { DiscordRoutingPolicy } from "./routing.js";
+import { type DiscordRoutingPolicy, isAllowedGuild } from "./routing.js";
 
 const MAX_THREAD_TITLE_CHARS = 100;
 
@@ -82,6 +82,9 @@ export class DiscordThreadCreationService {
 	}> {
 		if (scope.kind === "dm" || !scope.guildId) {
 			throw forbidden("Discord threads can only be created from a server channel.");
+		}
+		if (!isAllowedGuild(this.policy, scope.guildId)) {
+			throw forbidden("This Discord guild is not authorized by gateway policy.");
 		}
 		const source = await this.adapter.getChannel(scope.channelId);
 		if (!source || source.id !== scope.channelId || source.guildId !== scope.guildId || source.kind === "dm") {
