@@ -34,6 +34,8 @@ export interface DiscordResponseWriterOptions {
 export interface DiscordResponseWriteResult {
 	chunks: readonly string[];
 	deliveryErrors: readonly unknown[];
+	/** True only when Discord acknowledged every terminal response chunk. */
+	terminalDelivered: boolean;
 }
 
 interface MarkdownFence {
@@ -293,11 +295,13 @@ export class DiscordResponseWriter {
 		}
 	}
 
-	async #send(content: string): Promise<void> {
+	async #send(content: string): Promise<boolean> {
 		try {
 			await this.#channel.send(messagePayload(content));
+			return true;
 		} catch (error) {
 			this.#recordDeliveryError(error);
+			return false;
 		}
 	}
 
@@ -321,13 +325,18 @@ export class DiscordResponseWriter {
 		await this.#operations;
 		const chunks = splitDiscordMessage(content);
 		const first = chunks[0] ?? this.#options.emptyText;
+		let terminalDelivered: boolean;
 		if (!this.#message) {
-			await this.#send(first);
+			terminalDelivered = await this.#send(first);
 		} else if (chunks.length > 1 || this.#lastStreamedPreview !== content) {
-			await this.#edit(first);
+			// A status-receipt edit can fail after the worker has already completed.
+			// Preserve terminal visibility by attempting a standalone final message.
+			terminalDelivered = (await this.#edit(first)) || (await this.#send(first));
+		} else {
+			terminalDelivered = true;
 		}
-		for (const chunk of chunks.slice(1)) await this.#send(chunk);
-		return { chunks, deliveryErrors: [...this.#errors] };
+		for (const chunk of chunks.slice(1)) terminalDelivered = (await this.#send(chunk)) && terminalDelivered;
+		return { chunks, deliveryErrors: [...this.#errors], terminalDelivered };
 	}
 }
 
