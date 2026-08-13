@@ -6,6 +6,8 @@ export interface DiscordRoutingPolicy {
 	allowedUsers: readonly string[];
 	allowedRoles: readonly string[];
 	allowAllUsers: boolean;
+	/** Restricts server traffic before any channel or identity policy is evaluated. */
+	allowedGuilds: readonly string[];
 	allowedChannels: readonly string[];
 	ignoredChannels: readonly string[];
 	freeResponseChannels: readonly string[];
@@ -20,6 +22,7 @@ export interface DiscordRoutingPolicy {
 export interface DiscordMessageRouteInput {
 	kind: DiscordChannelKind;
 	channelId: string;
+	guildId?: string;
 	parentChannelId?: string;
 	authorId: string;
 	authorRoleIds?: readonly string[];
@@ -32,6 +35,7 @@ export interface DiscordMessageRouteInput {
 
 export type DiscordIgnoreReason =
 	| "self_message"
+	| "guild_not_allowed"
 	| "ignored_channel"
 	| "channel_not_allowed"
 	| "unauthorized"
@@ -59,6 +63,17 @@ function includesChannel(channels: readonly string[], input: DiscordMessageRoute
 	);
 }
 
+/**
+ * An empty allowlist keeps the backwards-compatible behavior of accepting any guild.
+ * A missing guild ID never satisfies a non-empty allowlist, so malformed server events fail closed.
+ */
+export function isAllowedGuild(
+	policy: Pick<DiscordRoutingPolicy, "allowedGuilds">,
+	guildId: string | undefined,
+): boolean {
+	return policy.allowedGuilds.length === 0 || (guildId !== undefined && policy.allowedGuilds.includes(guildId));
+}
+
 function isAuthorized(input: DiscordMessageRouteInput, policy: DiscordRoutingPolicy, channelAllowed: boolean): boolean {
 	if (policy.allowAllUsers) return true;
 	if (policy.allowedUsers.includes(input.authorId)) return true;
@@ -78,6 +93,10 @@ function respond(reason: DiscordRespondReason, createThread = false): DiscordRou
 
 export function routeMessage(input: DiscordMessageRouteInput, policy: DiscordRoutingPolicy): DiscordRouteDecision {
 	if (input.authorIsSelf) return { action: "ignore", reason: "self_message" };
+
+	if (input.kind !== "dm" && !isAllowedGuild(policy, input.guildId)) {
+		return { action: "ignore", reason: "guild_not_allowed" };
+	}
 
 	if (input.kind !== "dm" && includesChannel(policy.ignoredChannels, input)) {
 		return { action: "ignore", reason: "ignored_channel" };

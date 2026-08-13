@@ -83,6 +83,7 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		allowedUsers: ["user-1"],
 		allowedRoles: [],
 		allowAllUsers: false,
+		allowedGuilds: [],
 		allowedChannels: [],
 		ignoredChannels: [],
 		freeResponseChannels: [],
