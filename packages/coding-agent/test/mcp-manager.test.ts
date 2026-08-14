@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -19,6 +19,7 @@ describe("McpManager", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		resetOAuthProviders();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -70,6 +71,75 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 		registry.refresh(); // resets registry; hook must re-add the custom provider
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
+	});
+
+	it("forwards a pre-registered OAuth client and its requested scopes for a custom server", async () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				pcg: {
+					type: "http",
+					url: "https://pcg.test/mcp",
+					oauth: true,
+					oauthClientId: "primecord-approved-agent",
+					oauthScopes: ["memory:search", "memory:read"],
+				},
+			}),
+		});
+		void manager;
+		let authUrl = "";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "https://pcg.test/.well-known/oauth-protected-resource/mcp") {
+					return new Response(
+						JSON.stringify({
+							authorization_servers: ["https://id.test"],
+							scopes_supported: ["memory:search", "memory:read"],
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://id.test/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://id.test/authorize",
+							token_endpoint: "https://id.test/token",
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://id.test/token") {
+					const params = new URLSearchParams(String(init?.body));
+					expect(params.get("client_id")).toBe("primecord-approved-agent");
+					return new Response(
+						JSON.stringify({ access_token: "access", refresh_token: "refresh", expires_in: 3600 }),
+						{
+							headers: { "Content-Type": "application/json" },
+						},
+					);
+				}
+				throw new Error(`unexpected fetch: ${url}`);
+			}),
+		);
+		const provider = getOAuthProvider("mcp:pcg");
+		expect(provider).toBeDefined();
+		const credentials = await provider?.login({
+			onAuth: (info) => {
+				authUrl = info.url;
+			},
+			onPrompt: async () => "",
+			onManualCodeInput: async () => {
+				const callbackUrl = new URL(authUrl).searchParams.get("redirect_uri") ?? "";
+				const state = new URL(authUrl).searchParams.get("state") ?? "";
+				return `${callbackUrl}?code=approved&state=${state}`;
+			},
+		});
+		expect(credentials?.access).toBe("access");
+		const authParams = new URL(authUrl).searchParams;
+		expect(authParams.get("client_id")).toBe("primecord-approved-agent");
+		expect(authParams.get("scope")).toBe("memory:search memory:read");
 	});
 
 	it("exposes only mcp.refresh when no interactive login is wired", async () => {

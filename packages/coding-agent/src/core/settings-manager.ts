@@ -104,6 +104,10 @@ export type McpServerConfig =
 			bearerTokenEnvVar?: string;
 			/** Use the generic OAuth login flow for this server. */
 			oauth?: boolean;
+			/** Pre-registered public OAuth client ID; skips dynamic client registration. */
+			oauthClientId?: string;
+			/** OAuth scopes to request, rather than every scope the authorization server advertises. */
+			oauthScopes?: string[];
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
 			/**
