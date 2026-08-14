@@ -701,6 +701,8 @@ export interface AgentConnection {
 	startSideQuestion(id: string, question: string, previousTurns?: AgentConnectionSideQuestionTurn[]): Promise<void>;
 	abortSideQuestion(id: string): Promise<boolean>;
 	steer(message: string, images?: ImageContent[]): Promise<void>;
+	/** Queue steering only if the current agent run is still live; never wakes an idle session. */
+	steerIfStreaming(message: string, images?: ImageContent[]): Promise<boolean>;
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
 	/** Request cancellation of the active turn and return once the request is accepted. */
 	abort(): Promise<void>;

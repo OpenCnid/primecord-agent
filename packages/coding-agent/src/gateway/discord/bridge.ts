@@ -50,7 +50,7 @@ import {
 	presentDiscordExtensionUi,
 } from "./extension-ui.js";
 import { type DiscordOutboundMedia, extractDiscordMedia, loadDiscordOutboundMedia } from "./outbound-media.js";
-import { buildDiscordTurnPrompt, DISCORD_WORKER_SYSTEM_SCAFFOLD } from "./prompt.js";
+import { buildDiscordSteerPrompt, buildDiscordTurnPrompt, DISCORD_WORKER_SYSTEM_SCAFFOLD } from "./prompt.js";
 import {
 	DiscordReadAdapterError,
 	type DiscordReadChannel,
@@ -97,6 +97,12 @@ const COMMANDS = [
 		.setDescription("Create a new Prime Agent conversation thread")
 		.addStringOption((option) => option.setName("title").setDescription("Thread title").setRequired(true)),
 	new SlashCommandBuilder().setName("abort").setDescription("Abort the active run and clear queued messages"),
+	new SlashCommandBuilder()
+		.setName("steer")
+		.setDescription("Steer the active Prime Agent task at its next safe boundary")
+		.addStringOption((option) =>
+			option.setName("instruction").setDescription("Instruction for the active task").setRequired(true),
+		),
 	new SlashCommandBuilder().setName("status").setDescription("Show the active Prime Agent session status"),
 	new SlashCommandBuilder().setName("capabilities").setDescription("List discovered Prime Agent capabilities"),
 	new SlashCommandBuilder()
@@ -151,6 +157,51 @@ interface PendingExtensionDialog {
 	messages: Message[];
 	responding: boolean;
 	timeout?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Bridge-local ownership of the one Discord receipt currently representing a
+ * session turn. Steering must bypass the ordinary message dispatch queue, but
+ * it still has to stop at a well-defined terminal boundary so it cannot turn a
+ * just-finished receipt into a new unobserved task.
+ */
+class DiscordActiveTurn {
+	private acceptingSteers = false;
+	private steeringTail: Promise<void> = Promise.resolve();
+
+	constructor(
+		private readonly connection: AgentConnection,
+		private readonly ownerUserId: string,
+	) {}
+
+	activate(): void {
+		this.acceptingSteers = true;
+	}
+
+	isOwnedBy(userId: string): boolean {
+		return this.ownerUserId === userId;
+	}
+
+	isForConnection(connection: AgentConnection | undefined): boolean {
+		return connection === this.connection;
+	}
+
+	async steer(prompt: string): Promise<boolean> {
+		if (!this.acceptingSteers) return false;
+		let accepted = false;
+		const steering = this.steeringTail.then(async () => {
+			if (!this.acceptingSteers) return;
+			accepted = await this.connection.steerIfStreaming(prompt);
+		});
+		this.steeringTail = steering.catch(() => undefined);
+		await steering;
+		return accepted;
+	}
+
+	async close(): Promise<void> {
+		this.acceptingSteers = false;
+		await this.steeringTail;
+	}
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -217,6 +268,7 @@ export class DiscordBridge {
 	private readonly dispatchQueue = new DiscordDispatchQueue();
 	private readonly dedupe = new DiscordMessageDedupe();
 	private readonly activeExtensionUiOwners = new Map<string, ActiveExtensionUiOwner>();
+	private readonly activeTurns = new Map<string, DiscordActiveTurn>();
 	private readonly activeDiscordReadScopes = new Map<AgentConnection, DiscordReadScope>();
 	private readonly activeDiscordThreadCreationScopes = new Map<AgentConnection, DiscordThreadCreationScope>();
 	private readonly discordReadService: DiscordReadService;
@@ -235,6 +287,7 @@ export class DiscordBridge {
 	private fatalError: Error | undefined;
 	private gatewayHealthTimer: ReturnType<typeof setInterval> | undefined;
 	private gatewayHealthFailures = 0;
+	private deferredGatewayHealthFailure: string | undefined;
 	private resolveStopped!: () => void;
 	private readonly stopped = new Promise<void>((resolve) => {
 		this.resolveStopped = resolve;
@@ -387,6 +440,21 @@ export class DiscordBridge {
 		);
 		if (this.gatewayHealthFailures < this.config.gatewayHealthFailureThreshold) return;
 
+		// A current receipt can still deliver via Discord's REST API even when the
+		// Gateway WebSocket is unhealthy. Do not turn that unrelated health problem
+		// into a user-visible aborted task; stop admitting new work and drain the
+		// existing receipt before supervisor replacement.
+		if (this.activeTurns.size > 0) {
+			this.deferredGatewayHealthFailure ??= reason;
+			this.stopGatewayHealthMonitor();
+			this.logger.warn("Deferring Discord Gateway restart until active Discord work reaches a terminal result.");
+			return;
+		}
+		this.stopForGatewayHealthFailure(reason);
+	}
+
+	private stopForGatewayHealthFailure(reason: string): void {
+		if (this.stopRequested) return;
 		// Discord.js owns ordinary reconnects. A sustained bad state means event
 		// delivery is no longer trustworthy, so stop cleanly and let the service
 		// supervisor create a fresh client instead of risking duplicate dispatch.
@@ -399,11 +467,25 @@ export class DiscordBridge {
 		});
 	}
 
+	private stopForDeferredGatewayHealthFailure(): void {
+		const reason = this.deferredGatewayHealthFailure;
+		if (!reason || this.activeTurns.size > 0) return;
+		this.deferredGatewayHealthFailure = undefined;
+		this.stopForGatewayHealthFailure(reason);
+	}
+
 	private readonly onRegistryConnectionEvent = (
 		key: string,
 		connection: AgentConnection,
 		event: AgentConnectionEvent,
 	): void => {
+		if (event.type === "closed") {
+			const activeTurn = this.activeTurns.get(key);
+			if (activeTurn?.isForConnection(connection)) {
+				void activeTurn.close().catch(() => undefined);
+				this.activeTurns.delete(key);
+			}
+		}
 		if (event.type === "extension_error") {
 			this.logger.warn(
 				`Prime Agent extension failed (${event.extensionPath}, ${event.event}): ${safeErrorMessage(event.error, this.config.botToken)}`,
@@ -505,7 +587,7 @@ export class DiscordBridge {
 	};
 
 	private async handleMessage(message: Message): Promise<void> {
-		if (!this.accepting || message.webhookId || message.system) return;
+		if (!this.accepting || this.deferredGatewayHealthFailure || message.webhookId || message.system) return;
 		if (message.type !== MessageType.Default && message.type !== MessageType.Reply) return;
 		const sourceChannel = message.channel;
 		if (!sourceChannel.isSendable()) return;
@@ -555,6 +637,7 @@ export class DiscordBridge {
 		let attachments: ProcessedDiscordAttachments | undefined;
 		let writer: DiscordResponseWriter | undefined;
 		let progressReporter: DiscordProgressReporter | undefined;
+		let activeTurn: DiscordActiveTurn | undefined;
 		let writerFinalized = false;
 		let unsubscribe: (() => void) | undefined;
 		try {
@@ -611,6 +694,8 @@ export class DiscordBridge {
 				throw new Error("Discord rejected the initial response message");
 			}
 			progressReporter = new DiscordProgressReporter(writer, this.config.progressUpdateIntervalMs);
+			activeTurn = new DiscordActiveTurn(connection, message.author.id);
+			this.activeTurns.set(sessionKey, activeTurn);
 
 			let streamedText = "";
 			unsubscribe = connection.subscribe((event) => {
@@ -637,16 +722,24 @@ export class DiscordBridge {
 			await this.withExtensionUiOwner(sessionKey, message.author.id, targetChannel, connection, () =>
 				this.withDiscordReadScope(connection, readScope, () =>
 					this.withDiscordThreadCreationScope(connection, threadCreationScope, async () => {
-						await connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
-						if (invocation?.command.source === "extension") await connection.waitForIdle();
+						// Begin the regular turn before accepting a direct /steer command. The
+						// bridge keeps this scope (and its one response receipt) alive across
+						// every accepted steering turn.
+						const initialPrompt = connection.promptAndWait(prompt, { images: promptImages, source: "rpc" });
+						activeTurn?.activate();
+						await initialPrompt;
+						await connection.waitForIdle();
+						// Close the bridge-local steering gate, then wait once more for any
+						// steering instruction accepted just before that gate closed.
+						await activeTurn?.close();
+						await connection.waitForIdle();
 					}),
 				),
 			);
 			const finalText =
-				nonEmptyText(streamedText) ??
-				(invocation?.command.source === "extension"
+				invocation?.command.source === "extension"
 					? "Prime Agent extension command completed."
-					: await connection.getLastAssistantText());
+					: (nonEmptyText(await connection.getLastAssistantText()) ?? nonEmptyText(streamedText));
 			const terminalReport = requireTerminalReport(finalText);
 			const extractedMedia = extractDiscordMedia(terminalReport);
 			const outboundMedia = await loadDiscordOutboundMedia(extractedMedia.paths, {
@@ -664,10 +757,18 @@ export class DiscordBridge {
 			progressReporter = undefined;
 			const result = await writer.finish(responseText);
 			writerFinalized = true;
+			// A completed worker result must never be replaced by the generic failure
+			// message merely because the receipt's final edit had a transient outage.
+			// Make one independent, best-effort terminal retry with the actual report.
 			if (!result.terminalDelivered) {
-				throw new Error("Discord could not deliver the complete response");
+				const recovered = await safeSend(targetChannel, responseText);
+				if (!recovered) {
+					this.logger.warn("Discord could not deliver the completed terminal response after a retry.");
+				}
 			}
-			await sendDiscordMedia(targetChannel, outboundMedia.attachments);
+			await sendDiscordMedia(targetChannel, outboundMedia.attachments).catch((error: unknown) => {
+				this.logger.warn(`Discord media delivery failed: ${safeErrorMessage(error, this.config.botToken)}`);
+			});
 
 			if (this.config.reactions) await safeReaction(message, "✅");
 		} catch (error) {
@@ -687,6 +788,11 @@ export class DiscordBridge {
 			}
 			if (this.config.reactions) await safeReaction(message, "❌");
 		} finally {
+			if (activeTurn) {
+				await activeTurn.close().catch(() => undefined);
+				if (this.activeTurns.get(sessionKey) === activeTurn) this.activeTurns.delete(sessionKey);
+				this.stopForDeferredGatewayHealthFailure();
+			}
 			unsubscribe?.();
 			progressReporter?.stop();
 			await attachments?.cleanup().catch((error: unknown) => {
@@ -817,10 +923,19 @@ export class DiscordBridge {
 	}
 
 	private async runCommand(interaction: ChatInputCommandInteraction, key: string): Promise<string> {
+		if (
+			this.deferredGatewayHealthFailure &&
+			interaction.commandName !== "abort" &&
+			interaction.commandName !== "status" &&
+			interaction.commandName !== "steer"
+		) {
+			return "Discord Gateway recovery is pending. The current task may finish, but new work is temporarily unavailable.";
+		}
 		switch (interaction.commandName) {
 			case "thread":
 				return this.createConversationThread(interaction);
 			case "new": {
+				await this.activeTurns.get(key)?.close();
 				this.dispatchQueue.clear(key);
 				await this.cancelPendingExtensionDialog(key);
 				await this.clearExtensionUiMessages(key);
@@ -831,6 +946,7 @@ export class DiscordBridge {
 				return result.cancelled ? "New session cancelled." : "Started a new Prime Agent session.";
 			}
 			case "abort": {
+				await this.activeTurns.get(key)?.close();
 				this.dispatchQueue.clear(key);
 				await this.cancelPendingExtensionDialog(key);
 				await this.clearExtensionUiMessages(key);
@@ -839,6 +955,26 @@ export class DiscordBridge {
 				await connection.abortAndClearQueue();
 				await this.discardPendingExtensionDialogForKey(key);
 				return "Abort requested and queued messages cleared.";
+			}
+			case "steer": {
+				const instruction = interaction.options.getString("instruction", true).trim();
+				if (!instruction) return "Provide an instruction to steer the active task.";
+				const activeTurn = this.activeTurns.get(key);
+				if (!activeTurn || !activeTurn.isForConnection(this.registry.getExisting(key))) {
+					return "There is no active Prime Agent task to steer here.";
+				}
+				if (!activeTurn.isOwnedBy(interaction.user.id)) {
+					return "Only the user who started this task can steer it.";
+				}
+				const prompt = buildDiscordSteerPrompt({
+					authorName: interaction.user.username,
+					authorId: interaction.user.id,
+					request: instruction,
+				});
+				const accepted = await activeTurn.steer(prompt);
+				return accepted
+					? "Steering instruction accepted for the next safe task boundary."
+					: "The active Prime Agent task finished before that steering instruction could be accepted.";
 			}
 			case "status": {
 				const connection = this.registry.getExisting(key);
@@ -1405,6 +1541,8 @@ export class DiscordBridge {
 		try {
 			this.accepting = false;
 			this.stopGatewayHealthMonitor();
+			await Promise.allSettled([...this.activeTurns.values()].map((turn) => turn.close()));
+			this.activeTurns.clear();
 			this.activeDiscordReadScopes.clear();
 			this.activeDiscordThreadCreationScopes.clear();
 			await Promise.allSettled(
@@ -1755,11 +1893,17 @@ async function safeReaction(message: Message, emoji: string): Promise<void> {
 	await message.react(emoji).catch(() => undefined);
 }
 
-async function safeSend(channel: SendableChannels, content: string): Promise<void> {
+async function safeSend(channel: SendableChannels, content: string): Promise<boolean> {
 	const chunks = splitDiscordMessage(content);
+	let delivered = true;
 	for (const chunk of chunks) {
-		await channel.send({ content: chunk, allowedMentions: { parse: [], repliedUser: false } }).catch(() => undefined);
+		try {
+			await channel.send({ content: chunk, allowedMentions: { parse: [], repliedUser: false } });
+		} catch {
+			delivered = false;
+		}
 	}
+	return delivered;
 }
 
 function safeErrorMessage(error: unknown, token: string): string {
@@ -1793,6 +1937,7 @@ function commandHelp(): string {
 		"/new — start a new session",
 		"/thread — create a new conversation thread in this channel",
 		"/abort — stop the active run and clear queued messages",
+		"/steer — redirect the active task at its next safe boundary",
 		"/status — show session, model, and effort",
 		"/capabilities — list discovered tools and resources",
 		"/run — invoke a discovered extension, prompt, or skill command",

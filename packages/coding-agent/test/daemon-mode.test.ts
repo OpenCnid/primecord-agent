@@ -9182,6 +9182,33 @@ describe("daemon mode helpers", () => {
 		).rejects.toThrow("agentMessageId must not be empty");
 	});
 
+	it("routes strict steering without waking an idle session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const steerIfStreaming = vi.fn(async () => false);
+		const state = makeState("active-1");
+		(state.runtime as { session: unknown }).session = { steerIfStreaming };
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		await expect(
+			internals.handleCommand(makeClient("client-1", state.activeSessionId), {
+				id: "strict-steer-1",
+				type: "steer_if_streaming",
+				activeSessionId: state.activeSessionId,
+				message: "do not wake an idle session",
+			}),
+		).resolves.toMatchObject({ success: true, command: "steer_if_streaming", data: { accepted: false } });
+		expect(steerIfStreaming).toHaveBeenCalledWith("do not wake an idle session", undefined);
+	});
+
 	it("rejects invalid heartbeat delivery modes before persisting", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-heartbeat-delivery-mode-"));
 		try {

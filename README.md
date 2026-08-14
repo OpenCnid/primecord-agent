@@ -36,7 +36,7 @@ PrimeCord Agent extends [Prime Agent](https://github.com/PrimeIntellect-ai/prime
 - **Durable isolated sessions:** per-user conversation histories reconnect to resident Prime Agent workers after gateway restarts.
 - **Live agent output:** streamed replies, tool-progress updates, reactions, safe 2,000-character splitting, Markdown fence handling, and native workspace artifact uploads with `MEDIA:/path`.
 - **Images and files:** bounded Discord CDN downloads, actual MIME detection, image input, controlled file caching, and cleanup.
-- **Operational controls:** `/new`, `/thread`, `/abort`, `/status`, `/compact`, `/effort`, `/model`, and `/help` slash commands.
+- **Operational controls:** `/new`, `/thread`, `/abort`, `/steer`, `/status`, `/compact`, `/effort`, `/model`, and `/help` slash commands.
 - **Secure defaults:** fail-closed user, role, and channel allowlists; permission-scoped bounded Discord reads and thread creation; mention suppression; bot-loop prevention; and graceful shutdown.
 
 Start the gateway after configuring a Discord application and an access policy:

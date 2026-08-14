@@ -266,6 +266,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cancel_prompt_admission",
 	"prompt_and_wait",
 	"steer",
+	"steer_if_streaming",
 	"follow_up",
 	"restore_next_turn",
 	"restore_actions",
@@ -3923,6 +3924,13 @@ export class AgentDaemon {
 				}
 				this.recordWorkerRecoveryState(state, "steer_queued", true);
 				return success(command.id, "steer");
+			}
+
+			case "steer_if_streaming": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const accepted = await state.runtime.session.steerIfStreaming(command.message, command.images);
+				if (accepted) this.recordWorkerRecoveryState(state, "steer_queued", true);
+				return success(command.id, "steer_if_streaming", { accepted });
 			}
 
 			case "follow_up": {

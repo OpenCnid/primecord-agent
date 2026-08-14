@@ -4870,6 +4870,25 @@ export class AgentSession {
 	}
 
 	/**
+	 * Queue steering only while a lower agent run is actively streaming.
+	 * Unlike steer(), this fails closed instead of waking an idle session, which
+	 * lets external transports bind a control to the receipt that owns it.
+	 */
+	async steerIfStreaming(text: string, images?: ImageContent[]): Promise<boolean> {
+		if (!this.isStreaming) return false;
+		const normalized = this._normalizeSubmission(text, images, {
+			parseSessionCommands: false,
+			extensionCommands: "reject",
+			expandSkills: true,
+			expandPromptTemplates: true,
+		});
+		if (normalized instanceof Promise || normalized.kind !== "prompt") {
+			throw new Error("Queued prompt normalization did not produce a prompt");
+		}
+		return this._queuePreparedPrompt("steer", normalized.text, normalized.images);
+	}
+
+	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 * Delivered only when agent has no more tool calls or steering messages.
 	 * Expands skill commands and prompt templates. Errors on extension commands.

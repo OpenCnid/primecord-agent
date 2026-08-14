@@ -163,6 +163,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cancel_prompt_admission",
 	"prompt_and_wait",
 	"steer",
+	"steer_if_streaming",
 	"follow_up",
 	"restore_next_turn",
 	"restore_actions",
