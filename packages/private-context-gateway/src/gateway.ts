@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import * as z from "zod/v4";
-import { OAuthError, type Principal, type TokenVerifier } from "./auth.js";
-import { PCG_PROTOCOL_VERSION, type PcgConfig } from "./config.js";
+import { type NodeMcpRequestHandler, toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod/v4";
+import { hasScope, OAuthError, type Principal, type TokenVerifier } from "./auth.js";
+import type { PcgConfig } from "./config.js";
 import type { PcgStore, SnapshotInput } from "./store.js";
 
 const MCP_READ_SCOPES = ["memory:search", "memory:read"] as const;
@@ -17,10 +17,45 @@ export interface PcgGatewayOptions {
 	verifier: TokenVerifier;
 }
 
-export function createPcgHandler(
-	options: PcgGatewayOptions,
-): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-	return async (request, response) => {
+export interface PcgHandler {
+	(request: IncomingMessage, response: ServerResponse): Promise<void>;
+	/** Stop in-flight modern MCP exchanges before the Node HTTP server closes. */
+	close(): Promise<void>;
+}
+
+type PcgMcpAuthInfo = {
+	token: string;
+	clientId: string;
+	scopes: string[];
+	/** Request-scoped principal; never serialized into an MCP result. */
+	pcgPrincipal: Principal;
+};
+type AuthenticatedIncomingMessage = IncomingMessage & { auth?: PcgMcpAuthInfo };
+
+/**
+ * Build the SDK's 2026 HTTP entry once. It supplies server/discover,
+ * per-request metadata validation, the standard MCP HTTP headers, MRTR, and
+ * modern cancellation/subscription behavior. The PCG deliberately rejects
+ * legacy traffic rather than silently weakening a configured modern endpoint.
+ */
+function createPcgMcpHandler(options: PcgGatewayOptions): {
+	nodeHandler: NodeMcpRequestHandler;
+	close: () => Promise<void>;
+} {
+	const handler = createMcpHandler(
+		(context) => {
+			const principal = (context.authInfo as PcgMcpAuthInfo | undefined)?.pcgPrincipal;
+			if (!principal) throw new Error("PCG MCP handler was invoked without an authenticated principal");
+			return createMcpServer(options, principal);
+		},
+		{ legacy: "reject" },
+	);
+	return { nodeHandler: toNodeHandler(handler), close: handler.close };
+}
+
+export function createPcgHandler(options: PcgGatewayOptions): PcgHandler {
+	const mcp = createPcgMcpHandler(options);
+	const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
 		try {
 			if (!validateHostAndOrigin(request, options.config)) {
 				return sendJson(response, 403, { error: "forbidden" });
@@ -30,7 +65,7 @@ export function createPcgHandler(
 				return handleProtectedResourceMetadata(request, response, options.config);
 			}
 			if (path === "/healthz") return handleHealth(request, response);
-			if (path === "/mcp") return await handleMcp(request, response, options);
+			if (path === "/mcp") return await handleMcp(request, response, options, mcp.nodeHandler);
 			if (path === "/connector/v1/snapshots") return await handleSnapshotIngest(request, response, options);
 			return sendJson(response, 404, { error: "not_found" });
 		} catch (error) {
@@ -39,21 +74,26 @@ export function createPcgHandler(
 			return sendJson(response, 500, { error: "internal_error" });
 		}
 	};
+	return Object.assign(handler, { close: mcp.close });
 }
 
 export function createPcgServer(options: PcgGatewayOptions): Server {
-	return createServer((request, response) => {
-		void createPcgHandler(options)(request, response);
+	const handler = createPcgHandler(options);
+	const server = createServer((request, response) => {
+		void handler(request, response);
 	});
+	server.once("close", () => void handler.close());
+	return server;
 }
 
 async function handleMcp(
 	request: IncomingMessage,
 	response: ServerResponse,
 	options: PcgGatewayOptions,
+	nodeHandler: NodeMcpRequestHandler,
 ): Promise<void> {
-	// Even the deliberately unsupported transport methods are protected. This
-	// prevents the MCP endpoint itself becoming an unauthenticated probe surface.
+	// Authenticate before protocol parsing, including unsupported methods, so
+	// the endpoint cannot become an unauthenticated discovery/probe surface.
 	const principal = await options.verifier.verifyAny(
 		request.headers.authorization,
 		MCP_READ_SCOPES,
@@ -61,15 +101,26 @@ async function handleMcp(
 	);
 	if (request.method !== "POST") return methodNotAllowed(response, "POST");
 	const body = await readJson(request, options.config.maxRequestBytes);
-	validateLegacyMcpProtocol(request, body);
-	const server = createMcpServer(options, principal);
-	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+	const authenticatedRequest = request as AuthenticatedIncomingMessage;
+	authenticatedRequest.auth = toMcpAuthInfo(principal, request.headers.authorization);
 	try {
-		await server.connect(transport);
-		await transport.handleRequest(request, response, body);
+		await nodeHandler(authenticatedRequest, response, body);
 	} finally {
-		await Promise.allSettled([transport.close(), server.close()]);
+		// IncomingMessage objects are not reused, but clear the bearer token as
+		// soon as the SDK finishes to minimize its lifetime in host memory.
+		delete authenticatedRequest.auth;
 	}
+}
+
+function toMcpAuthInfo(principal: Principal, authorization: string | undefined): PcgMcpAuthInfo {
+	const token = authorization?.slice("Bearer ".length).trim();
+	if (!token) throw new OAuthError("Bearer access token is required");
+	return {
+		token,
+		clientId: principal.clientId,
+		scopes: [...principal.scopes],
+		pcgPrincipal: principal,
+	};
 }
 
 async function handleSnapshotIngest(
@@ -123,13 +174,13 @@ function createMcpServer(options: PcgGatewayOptions, principal: Principal): McpS
 		{ name: "primecord-private-context-gateway", version: "0.7.1" },
 		{ capabilities: { tools: { listChanged: false } } },
 	);
-	if (principal.scopes.has("memory:search"))
+	if (hasScope(principal.scopes, "memory:search"))
 		server.registerTool(
 			"primecord.memory.search",
 			{
 				title: "Search approved Primecord context",
 				description: "Search explicitly exported, redacted snapshots that the caller is authorized to read.",
-				inputSchema: { query: z.string().min(2).max(256) },
+				inputSchema: z.object({ query: z.string().min(2).max(256) }),
 				annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 			},
 			async ({ query }) => {
@@ -166,13 +217,13 @@ function createMcpServer(options: PcgGatewayOptions, principal: Principal): McpS
 				};
 			},
 		);
-	if (principal.scopes.has("memory:read"))
+	if (hasScope(principal.scopes, "memory:read"))
 		server.registerTool(
 			"primecord.memory.read",
 			{
 				title: "Read approved Primecord context",
 				description: "Read one authorized snapshot by opaque handle.",
-				inputSchema: { handle: z.string().regex(SNAPSHOT_ID) },
+				inputSchema: z.object({ handle: z.string().regex(SNAPSHOT_ID) }),
 				annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 			},
 			async ({ handle }) => {
@@ -242,20 +293,6 @@ async function readJson(request: IncomingMessage, limit: number): Promise<unknow
 		return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 	} catch {
 		throw new RequestError(400, "invalid_json");
-	}
-}
-
-function validateLegacyMcpProtocol(request: IncomingMessage, body: unknown): void {
-	if (!isRecord(body) || body.jsonrpc !== "2.0" || typeof body.method !== "string")
-		throw new RequestError(400, "invalid_mcp_request");
-	if (body.method === "initialize") {
-		if (!isRecord(body.params) || body.params.protocolVersion !== PCG_PROTOCOL_VERSION) {
-			throw new RequestError(400, "unsupported_mcp_protocol_version");
-		}
-		return;
-	}
-	if (request.headers["mcp-protocol-version"] !== PCG_PROTOCOL_VERSION) {
-		throw new RequestError(400, "unsupported_mcp_protocol_version");
 	}
 }
 

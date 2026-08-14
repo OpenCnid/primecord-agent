@@ -4,10 +4,12 @@ A **private, single-tenant, read-first** MCP service for explicitly exported
 Primecord context. PCG is a separate service; it never exposes the Discord
 bridge, the Prime Agent kernel, a live local daemon, or live user sessions.
 
-> **Protocol boundary:** this release deliberately supports only legacy MCP
-> `2025-11-25` over Streamable HTTP. `@modelcontextprotocol/sdk@1.30.0` does
-> not implement `2026-07-28`, so PCG does not claim its `server/discover`,
-> MRTR, subscriptions, caching, or per-request modern metadata features.
+> **Protocol boundary:** PCG serves only stateless MCP `2026-07-28` over
+> Streamable HTTP, using the released official TypeScript v2 SDK. It implements
+> `server/discover`, per-request metadata, standard HTTP-header validation,
+> modern cancellation, cache result fields, and the SDK's MRTR/subscription
+> machinery. It deliberately rejects legacy `initialize` traffic rather than
+> silently falling back to a stateful session protocol.
 
 ## What it does
 
@@ -75,8 +77,11 @@ authorization server.
 Configure the Pocket ID API resource as `https://pcg.example.com/mcp`, define
 three focused permissions (`memory:search`, `memory:read`,
 `pcg.snapshot.write`), and grant them only to the corresponding pre-registered
-clients. Use Authorization Code + PKCE/S256 for a human-approved agent and
-client credentials only for the connector.
+clients. PCG also recognizes its explicitly defined parent scope `memory` as a
+broader grant for the two `memory:*` read scopes; do not use that parent unless
+that broader access is intended. Dots and wildcard-like scope strings are not
+implicitly hierarchical. Use Authorization Code + PKCE/S256 for a
+human-approved agent and client credentials only for the connector.
 
 ### Caddy example
 
@@ -150,8 +155,11 @@ the private deployment’s snapshot-count quota.
   active Prime Agent/session.
 - Public multi-tenancy, dynamic client registration, PCG as an OAuth issuer,
   and client metadata URL fetching.
-- SSE, resumability, subscriptions, server notifications, legacy HTTP+SSE,
-  local stdio access, package registry execution, and 2026 MCP features.
+- Business-level change feeds or server-side jobs. The protocol-level
+  `subscriptions/listen` mechanism is provided by the SDK, but PCG exposes no
+  mutable context collection whose changes it publishes.
+- Legacy HTTP+SSE, local stdio access, package-registry execution, and a
+  legacy `initialize` compatibility endpoint.
 
 ## Validation
 
@@ -161,13 +169,13 @@ npm --prefix packages/private-context-gateway run build
 ```
 
 The tests cover protected-resource metadata/challenges, connector-only ingest,
-encrypted-at-rest snapshots, legacy protocol rejection, direct JSON stateless
-MCP initialization, independent scope filtering, owner/reader ACLs, and read
+encrypted-at-rest snapshots, modern `server/discover`, official-v2-client
+interoperability, independent scope filtering, owner/reader ACLs, and read
 limits. They are not a production security review.
 
 ## Sources
 
-- [MCP 2025-11-25 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-- [MCP 2025-11-25 authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
-- [MCP versioning and compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+- [MCP 2026-07-28 Streamable HTTP transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+- [MCP 2026-07-28 authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+- [MCP 2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
 - [Pocket ID API permissions](https://pocket-id.org/docs/guides/apis)
