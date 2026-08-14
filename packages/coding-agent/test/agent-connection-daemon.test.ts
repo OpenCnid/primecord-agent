@@ -92,6 +92,8 @@ class FakeDaemonClient {
 					success: true,
 					data: { status: this.cancelPromptAdmissionStatus },
 				};
+			case "steer_if_streaming":
+				return { type: "response", command: command.type, success: true, data: { accepted: true } };
 			case "list":
 				return {
 					type: "response",
@@ -710,6 +712,18 @@ describe("DaemonAgentConnection", () => {
 			type: "attach",
 			activeSessionId: "active-1",
 			telemetryDisabled: true,
+		});
+	});
+
+	it("requests strict steering without allowing an idle daemon session to resume", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+
+		await expect(connection.steerIfStreaming("keep the current task focused")).resolves.toBe(true);
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "steer_if_streaming",
+			activeSessionId: "active-1",
+			message: "keep the current task focused",
 		});
 	});
 

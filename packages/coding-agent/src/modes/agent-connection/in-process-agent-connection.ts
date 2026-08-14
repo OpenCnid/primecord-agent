@@ -363,6 +363,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		await this.session.steer(message, images, { resumeIfIdle: true });
 	}
 
+	async steerIfStreaming(message: string, images?: ImageContent[]): Promise<boolean> {
+		return this.session.steerIfStreaming(message, images);
+	}
+
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
 		await this.session.followUp(message, images, { resumeIfIdle: true });
 	}

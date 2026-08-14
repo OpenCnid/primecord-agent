@@ -123,6 +123,7 @@ The gateway registers these global slash commands:
 - `/new` — begin a clean Prime session for this Discord scope.
 - `/thread <title>` — create a new Discord thread with a clean Prime Agent session. It is available only in server text and announcement channels.
 - `/abort` — abort current work and clear queued messages.
+- `/steer <instruction>` — add guidance to the active task at its next safe boundary. Only the user who started the live bridge receipt can steer it, and it never revives an idle session. It does not cancel an in-flight tool call; use `/abort` to stop work.
 - `/status` — show the session, run state, model, and effort.
 - `/capabilities` — list active tools plus discovered context files, extensions, prompts, skills, themes, and invocable commands.
 - `/run` — invoke a discovered extension, prompt-template, or skill command with optional arguments.

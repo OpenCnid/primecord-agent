@@ -168,6 +168,7 @@ class FakeBridgeConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
 	private readonly responseGate = deferred<void>();
 	readonly prompts: string[] = [];
+	readonly steeringPrompts: string[] = [];
 	readonly promptOptions: Array<AgentConnectionPromptOptions | undefined> = [];
 	readonly toolEvents: AgentConnectionEvent[] = [];
 	readonly promptGates: Promise<void>[] = [];
@@ -211,6 +212,11 @@ class FakeBridgeConnection {
 		if (!this.extensionRequest) return;
 		for (const listener of this.listeners) void listener(this.extensionRequest);
 		await this.responseGate.promise;
+	}
+
+	async steerIfStreaming(prompt: string): Promise<boolean> {
+		this.steeringPrompts.push(prompt);
+		return true;
 	}
 
 	async waitForIdle(): Promise<void> {}
@@ -270,6 +276,39 @@ function createRunInteraction(
 			commandName: "run",
 			inGuild: () => guildId !== null,
 			options: { getString: (_name: string, _required: boolean) => command },
+			deferReply,
+			editReply,
+		},
+		deferReply,
+		editReply,
+	};
+}
+
+function createSteerInteraction(
+	channel: object,
+	instruction: string,
+	options: { userId?: string; guildId?: string | null; channelId?: string } = {},
+): {
+	interaction: object;
+	deferReply: ReturnType<typeof vi.fn>;
+	editReply: ReturnType<typeof vi.fn>;
+} {
+	const deferReply = vi.fn(async (_payload: unknown) => undefined);
+	const editReply = vi.fn(async (_payload: unknown) => undefined);
+	const userId = options.userId ?? "user-1";
+	const guildId = options.guildId ?? null;
+	const channelId = options.channelId ?? "dm-1";
+	return {
+		interaction: {
+			isChatInputCommand: () => true,
+			channel,
+			channelId,
+			guildId,
+			member: null,
+			user: { id: userId, username: "user", bot: false },
+			commandName: "steer",
+			inGuild: () => guildId !== null,
+			options: { getString: (_name: string, _required: boolean) => instruction },
 			deferReply,
 			editReply,
 		},
@@ -603,6 +642,215 @@ describe("DiscordBridge lifecycle", () => {
 		).toBe(true);
 		expect(edits.some((edit) => edit.content?.includes("Still working"))).toBe(true);
 		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("secret workspace command");
+		await bridge.stop();
+	});
+
+	it("steers an active receipt directly without creating another Discord response", async () => {
+		const client = new FakeDiscordClient();
+		const firstTurn = deferred<void>();
+		const connection = new FakeBridgeConnection(bridgeState(join(tmpdir(), "prime-discord-steer-session.jsonl")), []);
+		connection.promptGates.push(firstTurn.promise);
+		connection.lastAssistantText = "Steered task completed.";
+		const responses: Array<{ edits: Array<{ content?: string }> }> = [];
+		const channel = {
+			id: "guild-channel-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => {
+				const response = { edits: [] as Array<{ content?: string }> };
+				responses.push(response);
+				return { edit: vi.fn(async (edit: { content?: string }) => response.edits.push(edit)) };
+			}),
+		};
+		const message = {
+			id: "message-1",
+			content: "perform a long task",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "guild-channel-1",
+			guildId: "guild-1",
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => true,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(
+			client,
+			{
+				reactions: false,
+				streamUpdateIntervalMs: 0,
+				requireMention: false,
+				autoThread: false,
+				groupSessionsPerUser: false,
+				allowedUsers: ["user-1", "user-2"],
+			},
+			factory,
+		);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(connection.prompts).toHaveLength(1));
+		const sharedScope = { guildId: "guild-1", channelId: "guild-channel-1" };
+		const steer = createSteerInteraction(channel, "Use the safer approach.", sharedScope);
+		client.emit("interactionCreate", steer.interaction);
+		await vi.waitFor(() => expect(connection.steeringPrompts).toHaveLength(1));
+
+		expect(steer.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+		expect(steer.editReply).toHaveBeenCalledWith(
+			expect.objectContaining({ content: "Steering instruction accepted for the next safe task boundary." }),
+		);
+		expect(connection.prompts).toHaveLength(1);
+		expect(connection.steeringPrompts[0]).toContain("Use the safer approach.");
+		expect(responses).toHaveLength(1);
+
+		const unownedSteer = createSteerInteraction(channel, "Take over this task.", {
+			...sharedScope,
+			userId: "user-2",
+		});
+		client.emit("interactionCreate", unownedSteer.interaction);
+		await vi.waitFor(() => expect(unownedSteer.editReply).toHaveBeenCalledOnce());
+		expect(unownedSteer.editReply).toHaveBeenCalledWith(
+			expect.objectContaining({ content: "Only the user who started this task can steer it." }),
+		);
+		expect(connection.steeringPrompts).toHaveLength(1);
+
+		firstTurn.resolve();
+		await vi.waitFor(() => expect(responses[0]?.edits.at(-1)?.content).toBe("Steered task completed."));
+		await bridge.stop();
+	});
+
+	it("rejects steering when no bridge-owned task is live", async () => {
+		const client = new FakeDiscordClient();
+		const channel = { id: "dm-1", isThread: () => false, isSendable: () => true };
+		const bridge = createBridge(client, { reactions: false });
+		await bridge.start();
+
+		const steer = createSteerInteraction(channel, "Change direction.");
+		client.emit("interactionCreate", steer.interaction);
+		await vi.waitFor(() => expect(steer.editReply).toHaveBeenCalledOnce());
+		expect(steer.editReply).toHaveBeenCalledWith(
+			expect.objectContaining({ content: "There is no active Prime Agent task to steer here." }),
+		);
+		await bridge.stop();
+	});
+
+	it("keeps active work alive while a failed Gateway health check is deferred", async () => {
+		const client = new FakeDiscordClient();
+		const firstTurn = deferred<void>();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-health-drain-session.jsonl")),
+			[],
+		);
+		connection.promptGates.push(firstTurn.promise);
+		connection.lastAssistantText = "Completed despite Gateway recovery.";
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (edit: { content?: string }) => edits.push(edit)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "keep working",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(
+			client,
+			{
+				reactions: false,
+				streamUpdateIntervalMs: 0,
+				gatewayHealthCheckIntervalMs: 5,
+				gatewayHealthFailureThreshold: 1,
+				gatewayMaxPingMs: 50,
+			},
+			factory,
+		);
+		await bridge.start();
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(connection.prompts).toHaveLength(1));
+
+		const stopped = bridge.waitUntilStopped().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		client.ws.shards.get(0)!.ping = 51;
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		expect(client.destroyCalls).toBe(0);
+
+		firstTurn.resolve();
+		await vi.waitFor(() => expect(edits.at(-1)?.content).toBe("Completed despite Gateway recovery."));
+		await expect(stopped).resolves.toMatchObject({
+			message: "Discord Gateway WebSocket remained unhealthy: heartbeat_latency",
+		});
+		expect(client.destroyCalls).toBe(1);
+	});
+
+	it("retries a completed report instead of replacing it with the generic failure", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-terminal-retry-session.jsonl")),
+			[],
+		);
+		connection.lastAssistantText = "Completed terminal report.";
+		const sends: Array<{ content?: string }> = [];
+		let sendCount = 0;
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async (payload: { content?: string }) => {
+				sends.push(payload);
+				sendCount += 1;
+				if (sendCount === 2) throw new Error("temporary standalone delivery failure");
+				return {
+					edit: vi.fn(async () => {
+						throw new Error("temporary receipt edit failure");
+					}),
+				};
+			}),
+		};
+		const message = {
+			id: "message-1",
+			content: "complete this",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, { reactions: false, streamUpdateIntervalMs: 0 }, factory);
+		await bridge.start();
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(sends).toHaveLength(3));
+
+		expect(sends.at(-1)?.content).toBe("Completed terminal report.");
+		expect(sends.map((send) => send.content).join("\n")).not.toContain("Prime Agent could not complete this request");
 		await bridge.stop();
 	});
 
@@ -946,6 +1194,53 @@ describe("DiscordBridge lifecycle", () => {
 		expect(connection.prompts[0]).toContain('<discord_task_envelope version="2">');
 		expect(connection.prompts[0]).toContain("<completion_checkpoint");
 		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("(No response)");
+		await bridge.stop();
+	});
+
+	it("uses a completed streamed terminal report when stored final text is empty", async () => {
+		const client = new FakeDiscordClient();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-streamed-terminal-session.jsonl")),
+			[],
+		);
+		connection.lastAssistantText = "";
+		connection.toolEvents.push({
+			type: "session_event",
+			event: {
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "Completed streamed terminal report." },
+			},
+		} as AgentConnectionEvent);
+		const edits: Array<{ content?: string }> = [];
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async (payload: { content?: string }) => edits.push(payload)) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "inspect the workspace",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [] },
+			inGuild: () => false,
+		};
+		const factory: DiscordAgentConnectionFactory = async () => connection.asAgentConnection();
+		const bridge = createBridge(client, { reactions: false, streamUpdateIntervalMs: 0 }, factory);
+		await bridge.start();
+
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(edits.at(-1)?.content).toBe("Completed streamed terminal report."));
+		expect(edits.map((edit) => edit.content).join("\n")).not.toContain("Prime Agent could not complete this request");
 		await bridge.stop();
 	});
 

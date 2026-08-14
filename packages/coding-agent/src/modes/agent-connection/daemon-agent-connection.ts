@@ -907,6 +907,23 @@ export class DaemonAgentConnection implements AgentConnection {
 		await this.requestOk({ type: "steer", activeSessionId: this.activeSessionId, message, images });
 	}
 
+	async steerIfStreaming(message: string, images?: ImageContent[]): Promise<boolean> {
+		try {
+			const data = await this.requestData<{ accepted: boolean }>({
+				type: "steer_if_streaming",
+				activeSessionId: this.activeSessionId,
+				message,
+				images,
+			});
+			return data.accepted;
+		} catch (error) {
+			if (error instanceof DaemonCapabilityUnavailableError) {
+				throw new Error("the daemon is running an older build; restart the daemon and try again");
+			}
+			throw error;
+		}
+	}
+
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
 		await this.requestOk({ type: "follow_up", activeSessionId: this.activeSessionId, message, images });
 	}

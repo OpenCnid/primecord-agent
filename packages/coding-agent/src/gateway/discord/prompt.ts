@@ -37,6 +37,27 @@ const DISCORD_TURN_COMPLETION_CHECKPOINT = `<completion_checkpoint position="imm
   The bridge will attempt to deliver that response in Discord; do not claim that delivery occurred.
 </completion_checkpoint>`;
 
+/**
+ * Wrap an in-flight Discord steering instruction without reasserting the
+ * terminal-turn contract. The existing task owns completion; this envelope
+ * supplies only untrusted direction for that task.
+ */
+export function buildDiscordSteerPrompt(
+	input: Pick<DiscordTurnPromptInput, "authorName" | "authorId" | "request">,
+): string {
+	return `<discord_steer_envelope version="1">
+  <bridge_turn_context>
+    This is a steering instruction for the currently active Discord task, not a new task.
+    Continue using the existing bridge-owned status receipt and terminal-report contract.
+  </bridge_turn_context>
+
+  <discord_context trust="untrusted" provenance="Discord">
+    <origin author_name="${escapeXml(input.authorName)}" author_id="${escapeXml(input.authorId)}" />
+    <steering_instruction>${escapeXml(input.request)}</steering_instruction>
+  </discord_context>
+</discord_steer_envelope>`;
+}
+
 export function buildDiscordTurnPrompt(input: DiscordTurnPromptInput): string {
 	const history = input.history
 		? `

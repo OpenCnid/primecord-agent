@@ -50,6 +50,18 @@ describe("ENG-4653 queued messages after agent end", () => {
 		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
 	});
 
+	it("rejects strict steering while idle without starting a replacement turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		await expect(harness.session.steerIfStreaming("stale redirect")).resolves.toBe(false);
+		await harness.session.waitForIdle();
+
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(getUserTexts(harness)).toEqual([]);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+	});
+
 	it("starts a new turn for a follow-up queued from agent_end", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

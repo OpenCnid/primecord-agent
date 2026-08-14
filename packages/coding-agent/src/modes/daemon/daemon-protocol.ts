@@ -64,8 +64,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 16 adds capability-gated, client-hosted Discord gateway read requests.
 // Revision 17 adds capability-gated, client-hosted Discord thread-creation requests.
-export const DAEMON_SCHEMA_REVISION = 18;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-18-c55101007620";
+// Revision 19 adds fail-closed strict steering for an already-live agent run.
+export const DAEMON_SCHEMA_REVISION = 19;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-19-f62c717dcb09";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -107,7 +108,8 @@ export type DaemonServerCapability =
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
 	| "discord_gateway_read"
-	| "discord_gateway_thread_creation";
+	| "discord_gateway_thread_creation"
+	| "strict_steering";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -147,6 +149,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"transient_bash",
 	"session_input_admission",
 	"prompt_admission_cancellation",
+	"strict_steering",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -456,6 +459,13 @@ export type DaemonCommand =
 	  }
 	| {
 			id?: string;
+			type: "steer_if_streaming";
+			activeSessionId: string;
+			message: string;
+			images?: ImageContent[];
+	  }
+	| {
+			id?: string;
 			type: "follow_up";
 			activeSessionId: string;
 			message: string;
@@ -651,6 +661,11 @@ const SESSION_INPUT_ADMISSION_COMMAND = {
 	minProtocol: 7,
 	capability: "session_input_admission",
 } as const;
+const STRICT_STEERING_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 19,
+	capability: "strict_steering",
+} as const;
 const DISCORD_GATEWAY_READ_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 16,
@@ -693,6 +708,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	cancel_prompt_admission: PROMPT_ADMISSION_CANCELLATION_COMMAND,
 	prompt_and_wait: SESSION_INPUT_ADMISSION_COMMAND,
 	steer: SESSION_INPUT_ADMISSION_COMMAND,
+	steer_if_streaming: STRICT_STEERING_COMMAND,
 	follow_up: SESSION_INPUT_ADMISSION_COMMAND,
 	restore_next_turn: LEGACY_DAEMON_COMMAND,
 	restore_actions: LEGACY_DAEMON_COMMAND,
