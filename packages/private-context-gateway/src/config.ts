@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
-export const PCG_PROTOCOL_VERSION = "2025-11-25";
+/** The stateless modern MCP revision served by PCG. */
+export const PCG_PROTOCOL_VERSION = "2026-07-28";
 export const PCG_MAX_REQUEST_BYTES = 256 * 1024;
 export const PCG_MAX_SNAPSHOT_BYTES = 64 * 1024;
 export const PCG_MAX_READ_BYTES = 16 * 1024;

@@ -45,8 +45,8 @@ outbound connector, not an exposure of the local daemon:
       "type": "http",
       "url": "https://pcg.example.invalid/mcp",
       "oauth": true,
-      // Required until an official, conformance-tested 2026 SDK is released.
-      "protocol": "legacy-2025-11-25",
+      // Pin the stateless modern MCP revision; no silent downgrade is allowed.
+      "protocol": "2026-07-28",
       "enabledTools": ["primecord.memory.search", "primecord.memory.read"]
     }
   }
@@ -55,9 +55,11 @@ outbound connector, not an exposure of the local daemon:
 
 The broker blocks non-HTTPS, loopback, private-network, credential-in-URL, and
 redirecting HTTP endpoints. It does not return OAuth or bearer tokens to the
-kernel. The currently released official TypeScript SDK supports the legacy
-`2025-11-25` handshake protocol, not `2026-07-28`; the compatibility flag is
-therefore explicit rather than pretending that legacy traffic is modern MCP.
+kernel. It uses the official MCP TypeScript v2 client and pins a server declared
+as `"2026-07-28"` to the stateless modern wire revision (`server/discover`,
+per-request metadata, and required HTTP headers), so it cannot silently fall
+back to legacy traffic. `"legacy-2025-11-25"` remains available only as an
+explicit compatibility choice for a separately reviewed older server.
 Do not enable `primecord.agent.ask` until a dedicated service-agent budget,
 tenant policy, and audit service exist.
 

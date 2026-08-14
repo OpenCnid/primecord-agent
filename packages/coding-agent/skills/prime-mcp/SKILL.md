@@ -25,6 +25,8 @@ for tool in tools:
 result = await pcg.call("primecord.memory.search", {"query": "..."})
 ```
 
-The released official TypeScript SDK currently supports the legacy
-`2025-11-25` handshake protocol. Configure that compatibility mode explicitly;
-do not assume a configured server implements the planned `2026-07-28` protocol.
+For a configured modern server, set `protocol` to `"2026-07-28"`. The
+host-owned broker uses the official MCP TypeScript v2 client and pins that
+stateless revision, so it will fail rather than silently downgrade. The legacy
+`"legacy-2025-11-25"` value is a separate, explicit compatibility choice for a
+reviewed older server.

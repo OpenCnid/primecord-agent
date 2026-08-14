@@ -107,11 +107,10 @@ export type McpServerConfig =
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
 			/**
-			 * Explicit protocol compatibility opt-in. The released official SDK only
-			 * supports the legacy handshake protocol until a 2026-capable release is
-			 * available and conformance-tested.
+			 * Explicit wire-protocol selection. Use "2026-07-28" for modern
+			 * stateless MCP; legacy is an intentional compatibility escape hatch.
 			 */
-			protocol?: "legacy-2025-11-25";
+			protocol?: "2026-07-28" | "legacy-2025-11-25";
 			/** Exact tool names approved by the user after inspection. */
 			enabledTools?: string[];
 			/** Tool names that remain blocked even if listed in enabledTools. */
@@ -125,7 +124,8 @@ export type McpServerConfig =
 			/** Explicit acknowledgement that the local command was reviewed and approved. */
 			approved?: boolean;
 			enabled?: boolean;
-			protocol?: "legacy-2025-11-25";
+			/** Explicit wire-protocol selection; modern MCP is "2026-07-28". */
+			protocol?: "2026-07-28" | "legacy-2025-11-25";
 			enabledTools?: string[];
 			disabledTools?: string[];
 	  };

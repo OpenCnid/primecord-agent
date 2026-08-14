@@ -43,7 +43,7 @@ export class JwtTokenVerifier implements TokenVerifier {
 		allowedClientIds: ReadonlySet<string>,
 	): Promise<Principal> {
 		const principal = await this.parse(authorization, allowedClientIds);
-		if (!principal.scopes.has(requiredScope)) {
+		if (!hasScope(principal.scopes, requiredScope)) {
 			throw new OAuthError(`Required scope '${requiredScope}' is absent`, 403, "insufficient_scope");
 		}
 		return principal;
@@ -55,7 +55,7 @@ export class JwtTokenVerifier implements TokenVerifier {
 		allowedClientIds: ReadonlySet<string>,
 	): Promise<Principal> {
 		const principal = await this.parse(authorization, allowedClientIds);
-		if (!requiredScopes.some((scope) => principal.scopes.has(scope))) {
+		if (!requiredScopes.some((scope) => hasScope(principal.scopes, scope))) {
 			throw new OAuthError(`One of the required scopes is absent`, 403, "insufficient_scope");
 		}
 		return principal;
@@ -90,7 +90,7 @@ export class StaticTokenVerifier implements TokenVerifier {
 		allowedClientIds: ReadonlySet<string>,
 	): Promise<Principal> {
 		const principal = this.parse(authorization, allowedClientIds);
-		if (!principal.scopes.has(requiredScope)) {
+		if (!hasScope(principal.scopes, requiredScope)) {
 			throw new OAuthError(`Required scope '${requiredScope}' is absent`, 403, "insufficient_scope");
 		}
 		return principal;
@@ -102,7 +102,7 @@ export class StaticTokenVerifier implements TokenVerifier {
 		allowedClientIds: ReadonlySet<string>,
 	): Promise<Principal> {
 		const principal = this.parse(authorization, allowedClientIds);
-		if (!requiredScopes.some((scope) => principal.scopes.has(scope))) {
+		if (!requiredScopes.some((scope) => hasScope(principal.scopes, scope))) {
 			throw new OAuthError(`One of the required scopes is absent`, 403, "insufficient_scope");
 		}
 		return principal;
@@ -126,6 +126,17 @@ function bearerToken(authorization: string | undefined): string {
 function stringClaim(value: unknown, name: string): string {
 	if (typeof value !== "string" || !value) throw new OAuthError(`Token ${name} claim is required`);
 	return value;
+}
+
+/**
+ * PCG reserves a colon-delimited hierarchy for its own OAuth scopes: a parent
+ * such as `memory` grants its narrower `memory:search` and `memory:read`
+ * scopes. Other scope syntaxes remain exact strings; we never infer a broad
+ * grant from dots, prefixes, or wildcards that this resource server did not
+ * define.
+ */
+export function hasScope(grantedScopes: ReadonlySet<string>, requiredScope: string): boolean {
+	return [...grantedScopes].some((granted) => granted === requiredScope || requiredScope.startsWith(`${granted}:`));
 }
 
 function scopesFrom(value: unknown): ReadonlySet<string> {

@@ -2,11 +2,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Principal, StaticTokenVerifier } from "../src/auth.js";
-import { loadPcgConfig, type PcgConfig } from "../src/config.js";
+import { loadPcgConfig, PCG_PROTOCOL_VERSION, type PcgConfig } from "../src/config.js";
 import { createPcgServer } from "../src/gateway.js";
 import { PcgStore } from "../src/store.js";
 
@@ -48,6 +47,7 @@ async function service() {
 			"reader",
 			{ subject: "user:alice", clientId: "approved-agent", scopes: new Set(["memory:search", "memory:read"]) },
 		],
+		["broad", { subject: "user:alice", clientId: "approved-agent", scopes: new Set(["memory"]) }],
 		["bob", { subject: "user:bob", clientId: "approved-agent", scopes: new Set(["memory:search", "memory:read"]) }],
 	]);
 	const server = createPcgServer({ config: pcgConfig, store, verifier: new StaticTokenVerifier(tokens) });
@@ -84,20 +84,33 @@ async function fetchServer(
 	});
 }
 
-function requestBody(method: string, params: unknown, id = 1) {
-	return JSON.stringify({ jsonrpc: "2.0", id, method, params });
+function requestBody(method: string, params: Record<string, unknown> = {}, id = 1, protocol = PCG_PROTOCOL_VERSION) {
+	return JSON.stringify({
+		jsonrpc: "2.0",
+		id,
+		method,
+		params: {
+			...params,
+			_meta: {
+				"io.modelcontextprotocol/protocolVersion": protocol,
+				"io.modelcontextprotocol/clientInfo": { name: "pcg-test", version: "1" },
+				"io.modelcontextprotocol/clientCapabilities": {},
+			},
+		},
+	});
 }
 
-const headers = (token: string, protocol?: string) => ({
+const headers = (token: string, method?: string, name?: string, protocol = PCG_PROTOCOL_VERSION) => ({
 	"content-type": "application/json",
 	accept: "application/json, text/event-stream",
 	authorization: `Bearer ${token}`,
 	host: "pcg.example.test",
-	...(protocol ? { "mcp-protocol-version": protocol } : {}),
+	...(method ? { "mcp-protocol-version": protocol, "mcp-method": method } : {}),
+	...(name ? { "mcp-name": name } : {}),
 });
 
 describe("Primecord PCG v1", () => {
-	it("publishes protected-resource metadata and rejects unauthenticated MCP", async () => {
+	it("publishes protected-resource metadata and rejects unauthenticated modern MCP", async () => {
 		const { server } = await service();
 		const metadata = await fetchServer(server, "/.well-known/oauth-protected-resource/mcp", {
 			headers: { host: "pcg.example.test" },
@@ -112,11 +125,7 @@ describe("Primecord PCG v1", () => {
 		const denied = await fetchServer(server, "/mcp", {
 			method: "POST",
 			headers: { "content-type": "application/json", host: "pcg.example.test" },
-			body: requestBody("initialize", {
-				protocolVersion: "2025-11-25",
-				capabilities: {},
-				clientInfo: { name: "test", version: "1" },
-			}),
+			body: requestBody("server/discover"),
 		});
 		expect(denied.status).toBe(401);
 		expect(denied.headers.get("www-authenticate")).toContain("resource_metadata");
@@ -149,30 +158,40 @@ describe("Primecord PCG v1", () => {
 		expect(nonConnector.status).toBe(401);
 	});
 
-	it("requires protocol 2025-11-25 and allows stateless direct JSON initialization", async () => {
+	it("serves modern server/discover and rejects a legacy handshake", async () => {
 		const { server } = await service();
 		const response = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("reader"),
-			body: requestBody("initialize", {
-				protocolVersion: "2025-11-25",
-				capabilities: {},
-				clientInfo: { name: "test", version: "1" },
-			}),
+			headers: headers("reader", "server/discover"),
+			body: requestBody("server/discover"),
 		});
 		expect(response.status).toBe(200);
 		expect(response.headers.get("content-type")).toContain("application/json");
 		expect(response.headers.get("mcp-session-id")).toBeNull();
-		const wrongVersion = await fetchServer(server, "/mcp", {
+		expect(await response.json()).toMatchObject({
+			result: { resultType: "complete", supportedVersions: [PCG_PROTOCOL_VERSION] },
+		});
+
+		const legacy = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("reader"),
-			body: requestBody("initialize", {
-				protocolVersion: "2026-07-28",
-				capabilities: {},
-				clientInfo: { name: "test", version: "1" },
+			headers: headers("reader", "initialize", undefined, "2025-11-25"),
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 2,
+				method: "initialize",
+				params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "1" } },
 			}),
 		});
-		expect(wrongVersion.status).toBe(400);
+		expect(legacy.status).toBe(400);
+		expect(await legacy.text()).toContain("-32022");
+
+		const headerMismatch = await fetchServer(server, "/mcp", {
+			method: "POST",
+			headers: headers("search", "tools/call", "primecord.memory.read"),
+			body: requestBody("tools/call", { name: "primecord.memory.search", arguments: { query: "roadmap" } }),
+		});
+		expect(headerMismatch.status).toBe(400);
+		expect(await headerMismatch.text()).toContain("-32020");
 	});
 
 	it("works with the official stateless Streamable HTTP client", async () => {
@@ -181,13 +200,16 @@ describe("Primecord PCG v1", () => {
 		const address = server.address();
 		if (!address || typeof address === "string") throw new Error("test server unavailable");
 		(pcgConfig.allowedHosts as Set<string>).add(`127.0.0.1:${address.port}`);
-		const client = new Client({ name: "pcg-integration-test", version: "1" }, { capabilities: {} });
+		const client = new Client(
+			{ name: "pcg-integration-test", version: "1" },
+			{ versionNegotiation: { mode: { pin: PCG_PROTOCOL_VERSION } } },
+		);
 		const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`), {
 			requestInit: { headers: { authorization: "Bearer reader" } },
 		});
 		try {
 			await client.connect(transport);
-			expect(transport.sessionId).toBeUndefined();
+			expect(client.getProtocolEra()).toBe("modern");
 			const inventory = await client.listTools();
 			expect(inventory.tools.map((tool) => tool.name)).toEqual(["primecord.memory.search", "primecord.memory.read"]);
 		} finally {
@@ -210,28 +232,35 @@ describe("Primecord PCG v1", () => {
 				content: "Pineapple roadmap for the project",
 			}),
 		});
+		const broadInventory = await fetchServer(server, "/mcp", {
+			method: "POST",
+			headers: headers("broad", "tools/list"),
+			body: requestBody("tools/list"),
+		});
+		expect(await broadInventory.text()).toContain("primecord.memory.read");
+
 		const search = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("search", "2025-11-25"),
+			headers: headers("search", "tools/call", "primecord.memory.search"),
 			body: requestBody("tools/call", { name: "primecord.memory.search", arguments: { query: "pineapple" } }),
 		});
 		expect(search.status).toBe(200);
 		expect(await search.text()).toContain(id);
 		const noRead = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("search", "2025-11-25"),
+			headers: headers("search", "tools/call", "primecord.memory.read"),
 			body: requestBody("tools/call", { name: "primecord.memory.read", arguments: { handle: id } }),
 		});
 		expect(await noRead.text()).toContain("Tool primecord.memory.read not found");
 		const outsider = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("bob", "2025-11-25"),
+			headers: headers("bob", "tools/call", "primecord.memory.read"),
 			body: requestBody("tools/call", { name: "primecord.memory.read", arguments: { handle: id } }),
 		});
 		expect(await outsider.text()).toContain("not found, expired, or is not authorized");
 		const allowed = await fetchServer(server, "/mcp", {
 			method: "POST",
-			headers: headers("reader", "2025-11-25"),
+			headers: headers("reader", "tools/call", "primecord.memory.read"),
 			body: requestBody("tools/call", { name: "primecord.memory.read", arguments: { handle: id } }),
 		});
 		expect(await allowed.text()).toContain("Pineapple roadmap");

@@ -51,7 +51,7 @@
 		"@earendil-works/pi-agent-core": "^0.7.1",
 		"@earendil-works/pi-ai": "^0.7.1",
 		"@earendil-works/pi-tui": "^0.7.1",
-		"@modelcontextprotocol/sdk": "^1.30.0",
+		"@modelcontextprotocol/client": "^2.0.0",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",
@@ -83,6 +83,7 @@
 		"@mariozechner/clipboard": "^0.3.9"
 	},
 	"devDependencies": {
+		"@modelcontextprotocol/server": "^2.0.0",
 		"@types/diff": "^7.0.2",
 		"@types/hosted-git-info": "^3.0.5",
 		"@types/ms": "^2.1.0",

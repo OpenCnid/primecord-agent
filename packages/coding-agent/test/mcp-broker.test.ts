@@ -5,6 +5,7 @@ import {
 	McpBroker,
 	type McpBrokerConnectionFactory,
 	type McpBrokerServer,
+	MODERN_MCP_PROTOCOL_CONFIG,
 	SdkMcpBrokerConnectionFactory,
 } from "../src/core/mcp/mcp-broker.js";
 
@@ -103,11 +104,11 @@ describe("McpBroker", () => {
 describe("McpBroker official SDK compatibility", () => {
 	it("discovers and calls a user-approved local stdio server", async () => {
 		const childProgram = [
-			'import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";',
-			'import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";',
-			'import * as z from "zod/v4";',
+			'import { McpServer } from "@modelcontextprotocol/server";',
+			'import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";',
+			'import { z } from "zod/v4";',
 			'const server = new McpServer({ name: "test-pcg", version: "1.0.0" });',
-			'server.registerTool("primecord.memory.search", { inputSchema: { query: z.string() } }, async ({ query }) => ({ content: [{ type: "text", text: "found:" + query }] }));',
+			'server.registerTool("primecord.memory.search", { inputSchema: z.object({ query: z.string() }) }, async ({ query }) => ({ content: [{ type: "text", text: "found:" + query }] }));',
 			"await server.connect(new StdioServerTransport());",
 		].join("\n");
 		const localServer: McpBrokerServer = {
@@ -124,6 +125,34 @@ describe("McpBroker official SDK compatibility", () => {
 		await expect(broker.listTools("pcg")).resolves.toMatchObject([{ name: "primecord.memory.search" }]);
 		await expect(broker.callTool("pcg", "primecord.memory.search", { query: "roadmap" })).resolves.toMatchObject({
 			content: [{ type: "text", text: "found:roadmap" }],
+		});
+	});
+
+	it("pins a modern stdio server to the 2026-07-28 stateless protocol", async () => {
+		const childProgram = [
+			'import { McpServer } from "@modelcontextprotocol/server";',
+			'import { serveStdio } from "@modelcontextprotocol/server/stdio";',
+			'import { z } from "zod/v4";',
+			"await serveStdio(() => {",
+			'  const server = new McpServer({ name: "modern-pcg", version: "1.0.0" });',
+			'  server.registerTool("primecord.memory.search", { inputSchema: z.object({ query: z.string() }) }, async ({ query }) => ({ content: [{ type: "text", text: "modern:" + query }] }));',
+			"  return server;",
+			'}, { legacy: "reject" });',
+		].join("\n");
+		const localServer: McpBrokerServer = {
+			name: "pcg",
+			transport: "stdio",
+			command: process.execPath,
+			args: ["--input-type=module", "--eval", childProgram],
+			approved: true,
+			approvedTools: ["primecord.memory.search"],
+			protocol: MODERN_MCP_PROTOCOL_CONFIG,
+		};
+		const broker = new McpBroker(async () => localServer);
+
+		await expect(broker.listTools("pcg")).resolves.toMatchObject([{ name: "primecord.memory.search" }]);
+		await expect(broker.callTool("pcg", "primecord.memory.search", { query: "roadmap" })).resolves.toMatchObject({
+			content: [{ type: "text", text: "modern:roadmap" }],
 		});
 	});
 });

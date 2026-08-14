@@ -10,7 +10,13 @@ import {
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
-import { LEGACY_MCP_PROTOCOL_CONFIG, McpBroker, type McpBrokerServer } from "./mcp-broker.js";
+import {
+	LEGACY_MCP_PROTOCOL_CONFIG,
+	McpBroker,
+	type McpBrokerServer,
+	type McpProtocolConfig,
+	MODERN_MCP_PROTOCOL_CONFIG,
+} from "./mcp-broker.js";
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -30,8 +36,8 @@ interface ResolvedIntegration {
 	enabled?: boolean;
 	/** Extra static HTTP headers from the user config. */
 	headers?: Record<string, string>;
-	/** Explicit protocol compatibility opt-in for the generic broker. */
-	protocol?: "legacy-2025-11-25";
+	/** Explicit wire-protocol selection for the generic broker. */
+	protocol?: McpProtocolConfig;
 	/** Exact user-approved tools. All tool calls are denied if this is unset. */
 	enabledTools?: readonly string[];
 	/** Tools blocked even if they are present in enabledTools. */
@@ -166,7 +172,7 @@ export class McpManager {
 			}
 			if (!userConfig.protocol) {
 				throw new Error(
-					`Local MCP server '${server}' must explicitly set protocol '${LEGACY_MCP_PROTOCOL_CONFIG}'`,
+					`Local MCP server '${server}' must explicitly set protocol '${MODERN_MCP_PROTOCOL_CONFIG}' (or the explicit legacy compatibility value '${LEGACY_MCP_PROTOCOL_CONFIG}')`,
 				);
 			}
 			return {
@@ -186,7 +192,9 @@ export class McpManager {
 		if (!integration) return undefined;
 		if (integration.enabled === false) throw new Error(`MCP server '${server}' is disabled`);
 		if (!integration.protocol) {
-			throw new Error(`MCP server '${server}' must explicitly set protocol '${LEGACY_MCP_PROTOCOL_CONFIG}'`);
+			throw new Error(
+				`MCP server '${server}' must explicitly set protocol '${MODERN_MCP_PROTOCOL_CONFIG}' (or the explicit legacy compatibility value '${LEGACY_MCP_PROTOCOL_CONFIG}')`,
+			);
 		}
 		if (hasCredentialHeader(integration.headers)) {
 			throw new Error(`MCP server '${server}' must use OAuth or bearerTokenEnvVar, not an Authorization header`);

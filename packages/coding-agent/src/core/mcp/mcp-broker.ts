@@ -1,14 +1,20 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { type ConnectionOptions, connect as tlsConnect } from "node:tls";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Agent, fetch as undiciFetch } from "undici";
 
-export const LEGACY_MCP_PROTOCOL = "2025-11-25";
+/** The modern stateless MCP revision implemented by the v2 SDK. */
+export const MODERN_MCP_PROTOCOL = "2026-07-28";
+/** The explicit configuration value for the modern MCP revision. */
+export const MODERN_MCP_PROTOCOL_CONFIG = MODERN_MCP_PROTOCOL;
+/**
+ * Compatibility escape hatch for a deliberately configured pre-2026 server.
+ * New integrations should use MODERN_MCP_PROTOCOL_CONFIG.
+ */
 export const LEGACY_MCP_PROTOCOL_CONFIG = "legacy-2025-11-25";
+export type McpProtocolConfig = typeof MODERN_MCP_PROTOCOL_CONFIG | typeof LEGACY_MCP_PROTOCOL_CONFIG;
 
 const MAX_SERVER_NAME_LENGTH = 64;
 const MAX_TOOL_NAME_LENGTH = 128;
@@ -34,7 +40,7 @@ export type McpBrokerServer =
 			authorization?: string;
 			approvedTools?: readonly string[];
 			blockedTools?: readonly string[];
-			protocol: typeof LEGACY_MCP_PROTOCOL_CONFIG;
+			protocol: McpProtocolConfig;
 	  }
 	| {
 			name: string;
@@ -45,7 +51,7 @@ export type McpBrokerServer =
 			approved: true;
 			approvedTools?: readonly string[];
 			blockedTools?: readonly string[];
-			protocol: typeof LEGACY_MCP_PROTOCOL_CONFIG;
+			protocol: McpProtocolConfig;
 	  };
 
 export interface McpBrokerConnection {
@@ -64,9 +70,9 @@ export type McpBrokerServerResolver = (server: string) => Promise<McpBrokerServe
  * Host-owned MCP client surface. It deliberately exposes only JSON-safe tool
  * metadata/results to the kernel; endpoint credentials remain inside this process.
  *
- * The released official TypeScript SDK currently supports the legacy handshake era.
- * Callers must opt into it explicitly rather than silently treating it as the
- * requested 2026 protocol.
+ * Modern servers are pinned to the 2026-07-28 stateless protocol so a declared
+ * modern integration cannot be silently downgraded. Legacy remains an explicit
+ * compatibility choice for a separately reviewed pre-2026 server.
  */
 export class McpBroker {
 	constructor(
@@ -110,9 +116,9 @@ export class McpBroker {
 		validateServerName(serverName);
 		const server = await this.resolveServer(serverName);
 		if (!server) throw new Error(`Unknown MCP server '${serverName}'`);
-		if (server.protocol !== LEGACY_MCP_PROTOCOL_CONFIG) {
+		if (server.protocol !== MODERN_MCP_PROTOCOL_CONFIG && server.protocol !== LEGACY_MCP_PROTOCOL_CONFIG) {
 			throw new Error(
-				`MCP server '${serverName}' must explicitly set protocol '${LEGACY_MCP_PROTOCOL_CONFIG}'. The installed official SDK does not yet implement 2026-07-28.`,
+				`MCP server '${serverName}' must explicitly set protocol '${MODERN_MCP_PROTOCOL_CONFIG}' or '${LEGACY_MCP_PROTOCOL_CONFIG}'.`,
 			);
 		}
 		return server;
@@ -121,7 +127,14 @@ export class McpBroker {
 
 export class SdkMcpBrokerConnectionFactory implements McpBrokerConnectionFactory {
 	async open(server: McpBrokerServer): Promise<McpBrokerConnection> {
-		const client = new Client({ name: "prime-agent", version: "0.7.1" }, { capabilities: {} });
+		const client = new Client(
+			{ name: "prime-agent", version: "0.7.1" },
+			{
+				versionNegotiation: {
+					mode: server.protocol === MODERN_MCP_PROTOCOL_CONFIG ? { pin: MODERN_MCP_PROTOCOL } : "legacy",
+				},
+			},
+		);
 		const connection = await createTransport(server);
 		try {
 			await client.connect(connection.transport);
@@ -141,8 +154,7 @@ export class SdkMcpBrokerConnectionFactory implements McpBrokerConnectionFactory
 				}));
 			},
 			async callTool(tool: string, arguments_: Record<string, unknown>): Promise<unknown> {
-				const result = (await client.callTool({ name: tool, arguments: arguments_ })) as CallToolResult;
-				return result;
+				return await client.callTool({ name: tool, arguments: arguments_ });
 			},
 			async close(): Promise<void> {
 				try {
