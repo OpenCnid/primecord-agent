@@ -45,6 +45,11 @@ outbound connector, not an exposure of the local daemon:
       "type": "http",
       "url": "https://pcg.example.invalid/mcp",
       "oauth": true,
+      // PCG deliberately does not offer DCR. This is the administrator-created
+      // public PKCE client, never a client secret.
+      "oauthClientId": "primecord-approved-agent",
+      // Do not request the connector's pcg.snapshot.write scope.
+      "oauthScopes": ["memory:search", "memory:read"],
       // Pin the stateless modern MCP revision; no silent downgrade is allowed.
       "protocol": "2026-07-28",
       "enabledTools": ["primecord.memory.search", "primecord.memory.read"]
@@ -60,6 +65,16 @@ as `"2026-07-28"` to the stateless modern wire revision (`server/discover`,
 per-request metadata, and required HTTP headers), so it cannot silently fall
 back to legacy traffic. `"legacy-2025-11-25"` remains available only as an
 explicit compatibility choice for a separately reviewed older server.
+
+For PCG, browser login follows the endpoint's RFC 9728 protected-resource
+metadata to Pocket ID, then uses the configured pre-registered public client
+with PKCE/S256—no dynamic client registration or client secret. Register every
+callback URI `http://localhost:53700/callback` through
+`http://localhost:53709/callback` on that Pocket ID client (or the corresponding
+10-port range selected with `PI_MCP_OAUTH_CALLBACK_PORT`). Request only
+`memory:search` and `memory:read`; the connector's `pcg.snapshot.write` scope
+belongs to a separate client.
+
 Do not enable `primecord.agent.ask` until a dedicated service-agent budget,
 tenant policy, and audit service exist.
 
@@ -149,7 +164,9 @@ server fields:
 |-------|---------|
 | `type` | Must be `"http"` |
 | `url` | The MCP endpoint |
-| `oauth` | `true` to use the browser OAuth flow (requires the server to support dynamic client registration) |
+| `oauth` | `true` to use the browser OAuth flow |
+| `oauthClientId` | Optional administrator-pre-registered public OAuth client ID; skips dynamic client registration |
+| `oauthScopes` | Optional array of least-privilege scopes to request; otherwise uses the resource's advertised scopes |
 | `bearerTokenEnvVar` | Name of an env var holding a static bearer token, instead of OAuth |
 | `headers` | Extra static HTTP headers sent on every request |
 | `enabled` | Set `false` to force-disable even when credentials exist |
@@ -216,10 +233,12 @@ is a few lines — the package above is the whole integration.
 ### Authentication
 
 - **OAuth** (`"oauth": true`): the user runs `/login` → MCP Connections → your server (or
-  `/mcp login acme`). Works when the server supports OAuth 2.1 dynamic client
-  registration (RFC 7591); login discovers the auth server, registers a client,
-  and runs PKCE. Servers requiring a pre-registered client id are not yet
-  supported via `mcpServers`.
+  `/mcp login acme`). Login first follows RFC 9728 protected-resource metadata
+  when the MCP resource and authorization server are separate. It runs PKCE;
+  when the server supports OAuth 2.1 dynamic client registration (RFC 7591), a
+  client is registered automatically. Otherwise configure the administrator's
+  public `oauthClientId` and optional least-privilege `oauthScopes`; no client
+  secret is stored or sent by Prime Agent.
 - **Static bearer token** (`"bearerTokenEnvVar": "ACME_TOKEN"`): no login needed;
   the integration is "connected" whenever that env var is set. Set the matching
   `bearer_token_env = "ACME_TOKEN"` on the subclass.

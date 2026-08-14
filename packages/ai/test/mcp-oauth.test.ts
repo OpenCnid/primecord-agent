@@ -74,6 +74,58 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(authParams.get("scope")).toBe("read write");
 	});
 
+	it("follows protected-resource metadata to a separate OAuth issuer with a pre-registered client", async () => {
+		let authUrl = "";
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === "https://pcg.test/.well-known/oauth-protected-resource/mcp") {
+				return jsonResponse({
+					resource: "https://pcg.test/mcp",
+					authorization_servers: ["https://id.test/tenant"],
+					scopes_supported: ["memory:search", "memory:read"],
+				});
+			}
+			if (url === "https://id.test/.well-known/oauth-authorization-server/tenant") {
+				return jsonResponse({
+					issuer: "https://id.test/tenant",
+					authorization_endpoint: "https://id.test/tenant/authorize",
+					token_endpoint: "https://id.test/tenant/token",
+				});
+			}
+			if (url === "https://id.test/tenant/token") {
+				const params = new URLSearchParams(String(init?.body));
+				expect(params.get("client_id")).toBe("primecord-approved-agent");
+				expect(params.get("code_verifier")).toBeTruthy();
+				return jsonResponse({ access_token: "access-pcg", refresh_token: "refresh-pcg", expires_in: 3600 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const provider = createMcpOAuthProvider({
+			server: "pcg",
+			url: "https://pcg.test/mcp",
+			clientId: "primecord-approved-agent",
+		});
+		const creds = await provider.login({
+			onAuth: (info) => {
+				authUrl = info.url;
+			},
+			onPrompt: async () => "",
+			onManualCodeInput: async () => {
+				const state = new URL(authUrl).searchParams.get("state") ?? "";
+				return `${REDIRECT}?code=pcg-code&state=${state}`;
+			},
+		});
+
+		expect(creds.access).toBe("access-pcg");
+		const authParams = new URL(authUrl).searchParams;
+		expect(authParams.get("client_id")).toBe("primecord-approved-agent");
+		expect(authParams.get("scope")).toBe("memory:search memory:read");
+		expect(authParams.get("code_challenge_method")).toBe("S256");
+		expect(fetchMock.mock.calls.map(([input]) => urlOf(input))).not.toContain("https://id.test/tenant/register");
+	});
+
 	it("falls back to the next port when the base callback port is in use", async () => {
 		const http = await import("node:http");
 		// Occupy the base callback port. If something already holds it (e.g. a stray

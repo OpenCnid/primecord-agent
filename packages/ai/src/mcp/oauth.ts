@@ -1,4 +1,4 @@
-// Generic OAuth 2.1 (PKCE + dynamic client registration) for remote MCP servers.
+// Generic OAuth 2.1 (PKCE + optional dynamic client registration) for remote MCP servers.
 // One provider per server, registered as `mcp:<server>` so it reuses auth.json. Node-only (callback server).
 
 import type { Server } from "node:http";
@@ -26,16 +26,28 @@ interface AuthServerMetadata {
 	scopes_supported?: string[];
 }
 
+/** RFC 9728 metadata served by the MCP resource server. */
+interface ProtectedResourceMetadata {
+	authorization_servers?: unknown;
+	scopes_supported?: unknown;
+}
+
+interface OAuthDiscovery {
+	metadata: AuthServerMetadata;
+	/** Resource-server scopes take precedence over broad authorization-server defaults. */
+	resourceScopes?: string[];
+}
+
 export interface McpOAuthConfig {
 	/** MCP server name; provider id becomes `mcp:<server>`. */
 	server: string;
 	/** Human label for UI. */
 	label?: string;
-	/** The MCP endpoint URL — discovery is rooted at its origin. */
+	/** MCP resource endpoint. Discovery follows its RFC 9728 protected-resource metadata when present. */
 	url: string;
-	/** Pre-registered client id (servers without DCR, e.g. Slack). */
+	/** Pre-registered client id (servers without DCR, e.g. Pocket ID). */
 	clientId?: string;
-	/** Explicit scopes; falls back to the server's advertised scopes. */
+	/** Explicit scopes; falls back to resource-server then authorization-server advertised scopes. */
 	scopes?: string;
 }
 
@@ -63,20 +75,46 @@ function randomState(): string {
 		.replace(/=/g, "");
 }
 
-/** Try the protected-resource and auth-server well-known docs at the URL's origin. */
-async function discover(url: string): Promise<AuthServerMetadata> {
-	const origin = new URL(url).origin;
+/** Returns undefined only when optional RFC 9728 metadata is absent. */
+async function fetchOptionalJson(url: string): Promise<unknown | undefined> {
+	const res = await fetch(url);
+	if (res.status === 404) return undefined;
+	if (!res.ok) throw new Error(`GET ${url} failed: ${res.status} ${await res.text()}`);
+	return res.json();
+}
+
+function stringArray(value: unknown): string[] {
+	return Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+		: [];
+}
+
+function protectedResourceMetadataUrl(resourceUrl: string): string {
+	const resource = new URL(resourceUrl);
+	return new URL(`/.well-known/oauth-protected-resource${resource.pathname}`, resource.origin).toString();
+}
+
+/** Discover authorization-server metadata at an issuer or, for legacy servers, at its origin. */
+async function discoverAuthorizationServer(url: string, useIssuerPath = false): Promise<AuthServerMetadata> {
+	const authorizationServer = new URL(url);
+	if (authorizationServer.protocol !== "https:" || authorizationServer.username || authorizationServer.password) {
+		throw new Error(`Authorization server ${url} must be an HTTPS URL without credentials`);
+	}
+	const origin = authorizationServer.origin;
+	// RFC 8414 inserts the well-known segment before a path-qualified issuer;
+	// OpenID discovery appends it. Legacy MCP origin discovery keeps the old
+	// origin-only behavior so an endpoint such as /mcp is not mistaken for an issuer path.
+	const issuerPath =
+		useIssuerPath && authorizationServer.pathname !== "/" ? authorizationServer.pathname.replace(/\/$/, "") : "";
 	const candidates = [
-		`${origin}/.well-known/oauth-authorization-server`,
-		`${origin}/.well-known/openid-configuration`,
+		`${origin}/.well-known/oauth-authorization-server${issuerPath}`,
+		`${origin}${issuerPath}/.well-known/openid-configuration`,
 	];
 	let lastError: unknown;
 	for (const candidate of candidates) {
 		try {
 			const meta = (await fetchJson(candidate)) as AuthServerMetadata;
-			if (meta.authorization_endpoint && meta.token_endpoint) {
-				return meta;
-			}
+			if (meta.authorization_endpoint && meta.token_endpoint) return meta;
 		} catch (error) {
 			lastError = error;
 		}
@@ -85,6 +123,52 @@ async function discover(url: string): Promise<AuthServerMetadata> {
 		`Could not discover OAuth metadata for ${origin}. ` +
 			`Tried ${candidates.join(", ")}. Last error: ${String(lastError)}`,
 	);
+}
+
+/**
+ * Prefer RFC 9728 protected-resource metadata so the MCP resource and its OAuth
+ * issuer may live at different origins. Retain origin-based discovery for older
+ * remote MCP servers that do not publish protected-resource metadata.
+ */
+async function discover(url: string): Promise<OAuthDiscovery> {
+	const resourceMetadataUrl = protectedResourceMetadataUrl(url);
+	let protectedResourceError: unknown;
+	try {
+		const value = await fetchOptionalJson(resourceMetadataUrl);
+		if (value !== undefined) {
+			const protectedResource = value as ProtectedResourceMetadata;
+			const authorizationServers = stringArray(protectedResource.authorization_servers);
+			if (authorizationServers.length === 0) {
+				throw new Error(`${resourceMetadataUrl} returned no authorization_servers`);
+			}
+			let lastError: unknown;
+			for (const authorizationServer of authorizationServers) {
+				try {
+					return {
+						metadata: await discoverAuthorizationServer(authorizationServer, true),
+						resourceScopes: stringArray(protectedResource.scopes_supported),
+					};
+				} catch (error) {
+					lastError = error;
+				}
+			}
+			throw new Error(
+				`Could not discover an authorization server from ${resourceMetadataUrl}: ${String(lastError)}`,
+			);
+		}
+	} catch (error) {
+		protectedResourceError = error;
+	}
+
+	try {
+		return { metadata: await discoverAuthorizationServer(url) };
+	} catch (error) {
+		throw new Error(
+			`Could not discover OAuth metadata for ${url}. ` +
+				`Protected-resource discovery at ${resourceMetadataUrl}: ${String(protectedResourceError)}. ` +
+				`Origin fallback: ${String(error)}`,
+		);
+	}
 }
 
 /** Dynamic client registration (RFC 7591). Returns the issued client_id. */
@@ -251,7 +335,8 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 	const label = config.label ?? config.server;
 
 	async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		const meta = await discover(config.url);
+		const discovery = await discover(config.url);
+		const meta = discovery.metadata;
 		callbacks.onProgress?.(`Discovered ${meta.issuer ?? new URL(config.url).origin}`);
 
 		let clientId = config.clientId;
@@ -270,7 +355,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		// `state` must be independent of the PKCE verifier — the verifier is the
 		// secret used at token exchange, while `state` is echoed on the redirect URL.
 		const state = randomState();
-		const scope = config.scopes ?? meta.scopes_supported?.join(" ");
+		const scope = config.scopes ?? discovery.resourceScopes?.join(" ") ?? meta.scopes_supported?.join(" ");
 		const cb = await startCallbackServer(label);
 		try {
 			const authParams = new URLSearchParams({
@@ -356,7 +441,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 
 	async function refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
 		const creds = credentials as McpCredentials;
-		const tokenEndpoint = creds.tokenEndpoint ?? (await discover(config.url)).token_endpoint;
+		const tokenEndpoint = creds.tokenEndpoint ?? (await discover(config.url)).metadata.token_endpoint;
 		const clientId = creds.clientId ?? config.clientId;
 		if (!creds.refresh) {
 			throw new Error(`No refresh token stored for ${label}; re-run /mcp login ${config.server}`);

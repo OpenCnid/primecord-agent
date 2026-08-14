@@ -83,6 +83,36 @@ that broader access is intended. Dots and wildcard-like scope strings are not
 implicitly hierarchical. Use Authorization Code + PKCE/S256 for a
 human-approved agent and client credentials only for the connector.
 
+### Prime Agent broker configuration
+
+PCG deliberately does **not** support dynamic client registration. Register a
+public Pocket ID client for Prime Agent with PKCE/S256 and these callback URIs:
+`http://localhost:53700/callback` through
+`http://localhost:53709/callback` by default (or the corresponding 10-port
+range selected with `PI_MCP_OAUTH_CALLBACK_PORT`). Do not assign it
+`pcg.snapshot.write`.
+Configure the host-owned broker with that pre-registered client ID:
+
+```jsonc
+{
+  "mcpServers": {
+    "pcg": {
+      "type": "http",
+      "url": "https://pcg.example.com/mcp",
+      "oauth": true,
+      "oauthClientId": "primecord-approved-agent",
+      "oauthScopes": ["memory:search", "memory:read"],
+      "protocol": "2026-07-28",
+      "enabledTools": ["primecord.memory.search", "primecord.memory.read"]
+    }
+  }
+}
+```
+
+During login the broker follows PCG's RFC 9728 protected-resource metadata to
+Pocket ID, uses PKCE, and stores refreshed tokens host-side. No token or OAuth
+client secret enters the Python kernel.
+
 ### Caddy example
 
 ```caddy

@@ -33,6 +33,10 @@ interface ResolvedIntegration {
 	url: string;
 	usesOAuth: boolean;
 	bearerTokenEnvVar?: string;
+	/** Public OAuth client registration supplied by the administrator. */
+	oauthClientId?: string;
+	/** Least-privilege OAuth scopes supplied by the administrator. */
+	oauthScopes?: readonly string[];
 	enabled?: boolean;
 	/** Extra static HTTP headers from the user config. */
 	headers?: Record<string, string>;
@@ -92,6 +96,8 @@ export class McpManager {
 				url: config.url,
 				usesOAuth: config.oauth === true,
 				bearerTokenEnvVar: config.bearerTokenEnvVar,
+				oauthClientId: config.oauthClientId,
+				oauthScopes: config.oauthScopes,
 				enabled: config.enabled,
 				headers: config.headers,
 				protocol: config.protocol,
@@ -126,6 +132,8 @@ export class McpManager {
 						server: integration.server,
 						label: integration.label,
 						url: integration.url,
+						clientId: integration.oauthClientId,
+						scopes: integration.oauthScopes?.join(" "),
 					}),
 				);
 			} else if (getCatalogEntry(integration.server)) {
