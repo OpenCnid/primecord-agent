@@ -25,6 +25,8 @@ interface WorkerObservation {
 	leaseWorkerId?: string;
 	fenceEpoch?: number;
 	routeId?: string;
+	bindingId?: string;
+	adapterCalls?: readonly string[];
 }
 
 interface WorkerMessage {
@@ -65,7 +67,7 @@ function spawnAdmissionWorker(
 	statePath: string,
 	event: NormalizedInboundEvent,
 	workerId: string,
-	mode: "admit" | "commit-barrier" | "coordinated",
+	mode: "admit" | "commit-barrier" | "coordinated" | "execute",
 ): ChildProcess {
 	const child = spawn(process.execPath, [tsxPath, workerPath, statePath, JSON.stringify(event), workerId, mode], {
 		cwd: resolve(__dirname, "../.."),
@@ -199,6 +201,34 @@ describe("RCRS-7 task-runtime corrective regressions", () => {
 		});
 		const snapshot = await (await FileTaskRuntimeStore.open(statePath)).snapshot();
 		expect(Object.keys(snapshot.operations)).toHaveLength(0);
+	});
+
+	it("records live binding and adapter receipts from an actual worker process", async () => {
+		const statePath = await createStatePath();
+		const worker = spawnAdmissionWorker(statePath, inbound(), "worker-a", "execute");
+		const result = await waitForMessage(worker, "result");
+		expect(requireAdmission(result.result)).toMatchObject({ kind: "AdmissionCommitted" });
+		expect(requireObservation(result)).toMatchObject({
+			processId: expect.any(Number),
+			bindingId: expect.any(String),
+			adapterCalls: ["kernel", "provider", "effect", "delivery"],
+		});
+		const snapshot = await (await FileTaskRuntimeStore.open(statePath)).snapshot();
+		expect(snapshot.records.map((record) => record.type)).toContain("TaskExecutionBound");
+		expect(
+			snapshot.records
+				.filter((record) => record.type === "TaskExecutionObserved")
+				.map((record) => record.observation.kind),
+		).toEqual([
+			"KernelBindingStarted",
+			"KernelBindingSucceeded",
+			"ProviderStarted",
+			"ProviderSucceeded",
+			"EffectStarted",
+			"EffectSucceeded",
+			"DeliveryStarted",
+			"DeliverySucceeded",
+		]);
 	});
 
 	it("keeps per-state locks independent when stores share a parent directory", async () => {

@@ -2,9 +2,11 @@ import {
 	FileTaskRuntimeStore,
 	type NormalizedInboundEvent,
 	TaskRuntime,
+	TaskRuntimeHost,
+	type TaskRuntimeHostAdapters,
 } from "../../../src/core/task-runtime/index.js";
 
-type WorkerMode = "admit" | "commit-barrier" | "coordinated";
+type WorkerMode = "admit" | "commit-barrier" | "coordinated" | "execute";
 
 interface WorkerObservation {
 	processId: number;
@@ -15,6 +17,8 @@ interface WorkerObservation {
 	leaseWorkerId?: string;
 	fenceEpoch?: number;
 	routeId?: string;
+	bindingId?: string;
+	adapterCalls?: readonly string[];
 }
 
 interface WorkerMessage {
@@ -40,16 +44,22 @@ if (mode === "coordinated") {
 }
 
 const result = await runtime.admit(event);
-const observation = await observe(runtime, result, workerId);
+const executionObservation = mode === "execute" ? await execute(runtime, result) : undefined;
+const observation = await observe(runtime, result, workerId, executionObservation);
 if (mode === "commit-barrier") {
 	await send({ type: "committed", result, observation });
 	await new Promise<void>(() => undefined);
 }
 await send({ type: "result", result, observation });
 
-async function observe(runtime: TaskRuntime, result: unknown, workerId: string): Promise<WorkerObservation> {
+async function observe(
+	runtime: TaskRuntime,
+	result: unknown,
+	workerId: string,
+	executionObservation?: Pick<WorkerObservation, "bindingId" | "adapterCalls">,
+): Promise<WorkerObservation> {
 	if (!result || typeof result !== "object" || !("taskId" in result) || typeof result.taskId !== "string") {
-		return { processId: process.pid, workerId };
+		return { processId: process.pid, workerId, ...executionObservation };
 	}
 	const snapshot = await runtime.snapshot();
 	const task = snapshot.tasks[result.taskId];
@@ -64,11 +74,62 @@ async function observe(runtime: TaskRuntime, result: unknown, workerId: string):
 		leaseWorkerId: lease?.workerId,
 		fenceEpoch: lease?.fenceEpoch,
 		routeId: route?.routeId,
+		...executionObservation,
 	};
 }
 
+async function execute(
+	runtime: TaskRuntime,
+	result: unknown,
+): Promise<Pick<WorkerObservation, "bindingId" | "adapterCalls">> {
+	if (!result || typeof result !== "object" || !("taskId" in result) || typeof result.taskId !== "string") return {};
+	if (!("transitionSeq" in result) || typeof result.transitionSeq !== "number") return {};
+	const snapshot = await runtime.snapshot();
+	const lease = snapshot.leases[result.taskId];
+	if (!lease) throw new Error(`Missing lease for ${result.taskId}`);
+	const adapterCalls: string[] = [];
+	const adapters: TaskRuntimeHostAdapters = {
+		kernel: {
+			bind: async ({ task }) => {
+				adapterCalls.push("kernel");
+				return {
+					kernelId: `kernel:${task.taskId}`,
+					capabilityId: `capability:${task.taskId}`,
+					permittedOperationClasses: ["pure", "idempotent-external", "non-idempotent-external"],
+				};
+			},
+		},
+		provider: {
+			invoke: async ({ operation }) => {
+				adapterCalls.push("provider");
+				return { receiptRef: `provider-receipt:${operation.operationId}` };
+			},
+		},
+		effect: {
+			execute: async ({ operation }) => {
+				adapterCalls.push("effect");
+				return { receiptRef: `effect-receipt:${operation.operationId}` };
+			},
+		},
+		delivery: {
+			deliver: async ({ operation }) => {
+				adapterCalls.push("delivery");
+				return { receiptRef: `delivery-receipt:${operation.operationId}` };
+			},
+		},
+	};
+	const host = new TaskRuntimeHost({ runtime, adapters });
+	const execution = await host.startAndExecute({
+		taskId: result.taskId,
+		expectedTransitionSeq: result.transitionSeq,
+		expectedFenceEpoch: lease.fenceEpoch,
+		requestDigest: "worker-execute",
+	});
+	return { bindingId: execution.binding.bindingId, adapterCalls };
+}
+
 function isWorkerMode(value: string | undefined): value is WorkerMode {
-	return value === "admit" || value === "commit-barrier" || value === "coordinated";
+	return value === "admit" || value === "commit-barrier" || value === "coordinated" || value === "execute";
 }
 
 function waitForGo(): Promise<void> {
