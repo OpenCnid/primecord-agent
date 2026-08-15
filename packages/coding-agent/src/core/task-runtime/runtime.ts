@@ -15,6 +15,9 @@ import type {
 	OperationRecord,
 	StartOperationInput,
 	StartOperationResult,
+	TaskExecutionBinding,
+	TaskExecutionObservation,
+	TaskExecutionObservationKind,
 	TaskLease,
 	TaskRecord,
 	TaskRetentionPolicy,
@@ -124,6 +127,7 @@ export class TaskRuntime {
 			const task = state.tasks[input.taskId];
 			const lease = state.leases[input.taskId];
 			if (!task || !lease) throw new Error(`Unknown task: ${input.taskId}`);
+			assertActiveExecutionRoute(state, input.taskId, now);
 			if (lease.workerId !== this.workerId)
 				throw new Error(`Worker ${this.workerId} does not own the lease for ${input.taskId}`);
 			if (task.state !== "Ready") throw new Error(`Task ${input.taskId} is not ready to start work`);
@@ -208,6 +212,130 @@ export class TaskRuntime {
 			state.leases[taskId] = nextLease;
 			this.append(state, { type: "TaskLeaseAcquired", lease: nextLease }, nextLease.acquiredAt);
 			return structuredClone(nextLease);
+		});
+	}
+
+	async claimExecution(input: { taskId: string; operationId: string }): Promise<StartOperationResult> {
+		assertNonEmptyString(input.taskId, "taskId");
+		assertNonEmptyString(input.operationId, "operationId");
+		return this.store.transaction((state) => {
+			const now = this.clock.now();
+			const task = state.tasks[input.taskId];
+			const lease = state.leases[input.taskId];
+			const operation = state.operations[input.operationId];
+			if (!task || !lease || !operation || operation.taskId !== input.taskId) {
+				throw new Error(`Unknown task execution operation: ${input.operationId}`);
+			}
+			assertActiveExecutionRoute(state, input.taskId, now);
+			if (lease.workerId !== this.workerId)
+				throw new Error(`Worker ${this.workerId} does not own the lease for ${input.taskId}`);
+			if (operation.fenceEpoch !== lease.fenceEpoch) {
+				throw new Error(`Task execution claim rejected by fence compare-and-set for ${input.operationId}`);
+			}
+			if (operation.state !== "Prepared")
+				throw new Error(`Task execution operation is already claimed: ${input.operationId}`);
+			const claimedAt = now;
+			const claimed: OperationRecord = {
+				...operation,
+				state: "Claimed",
+				claimedAt,
+				claimedBy: this.workerId,
+			};
+			state.operations[input.operationId] = claimed;
+			this.append(state, { type: "TaskExecutionClaimed", operation: claimed }, claimedAt);
+			return structuredClone({ task, operation: claimed });
+		});
+	}
+
+	async recordExecutionBinding(binding: TaskExecutionBinding): Promise<TaskExecutionBinding> {
+		assertNonEmptyString(binding.bindingId, "bindingId");
+		assertNonEmptyString(binding.taskId, "taskId");
+		assertNonEmptyString(binding.kernelId, "kernelId");
+		assertNonEmptyString(binding.capabilityId, "capabilityId");
+		return this.store.transaction((state) => {
+			const task = state.tasks[binding.taskId];
+			const lease = state.leases[binding.taskId];
+			const route = state.routes[binding.routeId];
+			const operation = state.operations[binding.operationId];
+			if (!task || !lease || !route || !operation || operation.taskId !== binding.taskId) {
+				throw new Error(`Unknown task execution binding: ${binding.taskId}`);
+			}
+			const activeRoute = assertActiveExecutionRoute(state, binding.taskId, this.clock.now());
+			if (activeRoute.routeId !== binding.routeId) {
+				throw new Error(`Task execution binding does not match the active execution route for ${binding.taskId}`);
+			}
+			if (lease.workerId !== this.workerId)
+				throw new Error(`Worker ${this.workerId} does not own the lease for ${binding.taskId}`);
+			if (lease.fenceEpoch !== binding.fenceEpoch || operation.fenceEpoch !== binding.fenceEpoch) {
+				throw new Error(`Task execution binding rejected by fence compare-and-set for ${binding.taskId}`);
+			}
+			if (operation.state !== "Claimed") {
+				throw new Error(`Task execution binding requires a claimed operation for ${binding.operationId}`);
+			}
+			if (task.sessionRef !== binding.sessionRef || task.artifactRef !== binding.artifactRef) {
+				throw new Error(`Task execution binding does not match task routes for ${binding.taskId}`);
+			}
+			if (
+				route.taskId !== binding.taskId ||
+				route.state !== "active" ||
+				route.authorizationScopeDigest !== binding.authorizationScopeDigest
+			) {
+				throw new Error(`Task execution binding does not match an active route for ${binding.taskId}`);
+			}
+			this.append(state, { type: "TaskExecutionBound", binding: structuredClone(binding) }, this.clock.now());
+			return structuredClone(binding);
+		});
+	}
+
+	async recordExecutionObservation(input: {
+		taskId: string;
+		operationId: string;
+		fenceEpoch: number;
+		bindingId: string;
+		kind: TaskExecutionObservationKind;
+		receiptRef?: string;
+		failureKind?: string;
+	}): Promise<TaskExecutionObservation> {
+		assertNonEmptyString(input.taskId, "taskId");
+		assertNonEmptyString(input.operationId, "operationId");
+		assertNonEmptyString(input.bindingId, "bindingId");
+		return this.store.transaction((state) => {
+			const operation = state.operations[input.operationId];
+			const lease = state.leases[input.taskId];
+			if (!operation || operation.taskId !== input.taskId || !lease) {
+				throw new Error(`Unknown task execution operation: ${input.operationId}`);
+			}
+			assertActiveExecutionRoute(state, input.taskId, this.clock.now());
+			if (lease.workerId !== this.workerId)
+				throw new Error(`Worker ${this.workerId} does not own the lease for ${input.taskId}`);
+			if (operation.fenceEpoch !== input.fenceEpoch || lease.fenceEpoch !== input.fenceEpoch) {
+				throw new Error(`Task execution observation rejected by fence compare-and-set for ${input.operationId}`);
+			}
+			if (operation.state !== "Claimed")
+				throw new Error(`Task execution operation is not claimed: ${input.operationId}`);
+			const observations = state.records
+				.filter(
+					(record): record is Extract<TaskRuntimeRecord, { type: "TaskExecutionObserved" }> =>
+						record.type === "TaskExecutionObserved" &&
+						record.observation.taskId === input.taskId &&
+						record.observation.operationId === input.operationId,
+				)
+				.map((record) => record.observation);
+			const bindingExists = state.records.some(
+				(record) =>
+					record.type === "TaskExecutionBound" &&
+					record.binding.bindingId === input.bindingId &&
+					record.binding.taskId === input.taskId &&
+					record.binding.fenceEpoch === input.fenceEpoch,
+			);
+			if (!isAllowedExecutionObservation(input.kind, observations, bindingExists, input.bindingId)) {
+				throw new Error(`Task execution observation ${input.kind} is not allowed for ${input.operationId}`);
+			}
+			if (input.kind.endsWith("Succeeded")) assertNonEmptyString(input.receiptRef ?? "", "receiptRef");
+			if (input.kind.endsWith("Failed")) assertNonEmptyString(input.failureKind ?? "", "failureKind");
+			const observation: TaskExecutionObservation = structuredClone(input);
+			this.append(state, { type: "TaskExecutionObserved", observation }, this.clock.now());
+			return observation;
 		});
 	}
 
@@ -495,6 +623,47 @@ export class TaskRuntime {
 
 export function createInboxKey(event: Pick<NormalizedInboundEvent, "transport" | "inboundEventId">): string {
 	return JSON.stringify([event.transport, event.inboundEventId]);
+}
+
+function assertActiveExecutionRoute(state: DurableTaskRuntimeState, taskId: string, now: number): TaskRoute {
+	const routes = Object.values(state.routes).filter((route) => route.taskId === taskId && route.state === "active");
+	if (routes.length !== 1) throw new Error(`Task ${taskId} has no active execution route`);
+	const [route] = routes;
+	if (route.idleExpiresAt <= now || route.absoluteExpiresAt <= now) {
+		throw new Error(`Task ${taskId} active execution route is expired`);
+	}
+	return route;
+}
+
+function isAllowedExecutionObservation(
+	kind: TaskExecutionObservationKind,
+	observations: readonly TaskExecutionObservation[],
+	bindingExists: boolean,
+	bindingId: string,
+): boolean {
+	const last = observations.at(-1);
+	if (kind === "KernelBindingStarted") return !last;
+	if (kind === "KernelBindingReused") return !last && bindingExists;
+	if (kind === "KernelBindingSucceeded") {
+		return last?.kind === "KernelBindingStarted" && last.bindingId === bindingId && bindingExists;
+	}
+	if (kind === "KernelBindingFailed") return last?.kind === "KernelBindingStarted" && last.bindingId === bindingId;
+	if (kind === "ProviderStarted") {
+		return (
+			bindingExists &&
+			last?.bindingId === bindingId &&
+			(last.kind === "KernelBindingSucceeded" || last.kind === "KernelBindingReused")
+		);
+	}
+	if (kind === "ProviderSucceeded" || kind === "ProviderFailed") {
+		return last?.kind === "ProviderStarted" && last.bindingId === bindingId;
+	}
+	if (kind === "EffectStarted") return last?.kind === "ProviderSucceeded" && last.bindingId === bindingId;
+	if (kind === "EffectSucceeded" || kind === "EffectFailed") {
+		return last?.kind === "EffectStarted" && last.bindingId === bindingId;
+	}
+	if (kind === "DeliveryStarted") return last?.kind === "EffectSucceeded" && last.bindingId === bindingId;
+	return last?.kind === "DeliveryStarted" && last.bindingId === bindingId;
 }
 
 function digest(value: string): string {

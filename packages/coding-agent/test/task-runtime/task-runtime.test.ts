@@ -38,6 +38,12 @@ describe("RCRS-7 task runtime control plane", () => {
 		const snapshot = await harness.snapshot();
 		expect(snapshot.tasks).toEqual({});
 		expect(snapshot.leases).toEqual({});
+		expect(harness.kernelBindings()).toEqual([]);
+		expect(harness.capabilityBindings()).toEqual([]);
+		expect(harness.artifactManifest()).toEqual([]);
+		expect(harness.provider.callCount).toBe(0);
+		expect(harness.effect.callCount).toBe(0);
+		expect(harness.delivery.callCount).toBe(0);
 	});
 
 	it("ADM-02 issues independent lazy task, session, and artifact records for same-scope admissions", async () => {
@@ -60,6 +66,43 @@ describe("RCRS-7 task runtime control plane", () => {
 		expect(secondTask).toMatchObject({ state: "Ready", transitionSeq: 1 });
 		expect(firstTask.sessionRef).not.toBe(secondTask.sessionRef);
 		expect(firstTask.artifactRef).not.toBe(secondTask.artifactRef);
+		expect(harness.kernelBindings()).toEqual([]);
+		expect(harness.capabilityBindings()).toEqual([]);
+		expect(harness.artifactManifest()).toEqual([]);
+
+		await harness.startAndExecute({
+			taskId: first.taskId,
+			expectedTransitionSeq: first.transitionSeq,
+			expectedFenceEpoch: snapshot.leases[first.taskId].fenceEpoch,
+			requestDigest: "first-live-operation",
+		});
+		await harness.startAndExecute({
+			taskId: second.taskId,
+			expectedTransitionSeq: second.transitionSeq,
+			expectedFenceEpoch: snapshot.leases[second.taskId].fenceEpoch,
+			requestDigest: "second-live-operation",
+		});
+		expect(harness.kernelBindings()).toEqual([
+			expect.objectContaining({
+				taskId: first.taskId,
+				sessionRef: firstTask.sessionRef,
+				artifactRef: firstTask.artifactRef,
+			}),
+			expect.objectContaining({
+				taskId: second.taskId,
+				sessionRef: secondTask.sessionRef,
+				artifactRef: secondTask.artifactRef,
+			}),
+		]);
+		expect(harness.capabilityBindings().map((binding) => binding.taskId)).toEqual([first.taskId, second.taskId]);
+		expect(harness.routeBindings().map((binding) => binding.taskId)).toEqual([first.taskId, second.taskId]);
+		expect(harness.artifactManifest().map((entry) => entry.artifactRef)).toEqual([
+			firstTask.artifactRef,
+			secondTask.artifactRef,
+		]);
+		expect(harness.provider.callCount).toBe(2);
+		expect(harness.effect.callCount).toBe(2);
+		expect(harness.delivery.callCount).toBe(2);
 		expect((await harness.records()).filter((record) => record.type === "AdmissionCommitted")).toHaveLength(2);
 	});
 
@@ -78,6 +121,10 @@ describe("RCRS-7 task runtime control plane", () => {
 		expect((await harness.records()).filter((record) => record.type === "InboxReceived")).toHaveLength(1);
 		expect((await harness.records()).filter((record) => record.type === "InboxDecision")).toHaveLength(1);
 		expect(harness.transport.acknowledgements).toEqual([event.inboundEventId, event.inboundEventId]);
+		expect(harness.kernelBindings()).toEqual([]);
+		expect(harness.provider.callCount).toBe(0);
+		expect(harness.effect.callCount).toBe(0);
+		expect(harness.delivery.callCount).toBe(0);
 	});
 
 	it("ATR-01 routes an authorized active follow-up with host CAS and rejects a stale assertion", async () => {
@@ -87,7 +134,7 @@ describe("RCRS-7 task runtime control plane", () => {
 		if (admitted.kind !== "AdmissionCommitted") return;
 
 		const admittedSnapshot = await harness.snapshot();
-		const started = await harness.startOperation({
+		const started = await harness.startAndExecute({
 			taskId: admitted.taskId,
 			expectedTransitionSeq: admitted.transitionSeq,
 			expectedFenceEpoch: admittedSnapshot.leases[admitted.taskId].fenceEpoch,
@@ -108,6 +155,16 @@ describe("RCRS-7 task runtime control plane", () => {
 		expect(followUp.kind).toBe("ActiveTurnAdmitted");
 		if (followUp.kind !== "ActiveTurnAdmitted") return;
 		expect(followUp.operationId).not.toBe(started.operation.operationId);
+		expect(harness.kernelBindings()).toHaveLength(1);
+		expect(harness.provider.inputs).toEqual([
+			expect.objectContaining({ taskId: admitted.taskId, operationId: started.operation.operationId }),
+		]);
+		expect(harness.effect.inputs).toEqual([
+			expect.objectContaining({ taskId: admitted.taskId, operationId: started.operation.operationId }),
+		]);
+		expect(harness.delivery.inputs).toEqual([
+			expect.objectContaining({ taskId: admitted.taskId, operationId: started.operation.operationId }),
+		]);
 
 		const stale = await harness.transport.deliver(
 			inbound({

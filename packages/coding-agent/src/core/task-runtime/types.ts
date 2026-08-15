@@ -70,9 +70,52 @@ export interface OperationRecord {
 	fenceEpoch: number;
 	idempotencyKey: string;
 	class: OperationClass;
-	state: "Prepared";
+	state: "Prepared" | "Claimed";
 	requestDigest: string;
 	startedAt: number;
+	claimedAt?: number;
+	claimedBy?: string;
+}
+
+/** A live host binding recorded without credentials or task content. */
+export interface TaskExecutionBinding {
+	bindingId: string;
+	taskId: string;
+	operationId: string;
+	sessionRef: string;
+	artifactRef: string;
+	routeId: string;
+	authorizationScopeDigest: string;
+	fenceEpoch: number;
+	kernelId: string;
+	capabilityId: string;
+	permittedOperationClasses: readonly OperationClass[];
+}
+
+export type TaskExecutionObservationKind =
+	| "KernelBindingStarted"
+	| "KernelBindingSucceeded"
+	| "KernelBindingFailed"
+	| "KernelBindingReused"
+	| "ProviderStarted"
+	| "ProviderSucceeded"
+	| "ProviderFailed"
+	| "EffectStarted"
+	| "EffectSucceeded"
+	| "EffectFailed"
+	| "DeliveryStarted"
+	| "DeliverySucceeded"
+	| "DeliveryFailed";
+
+/** Durable metadata around an external host boundary; never contains prompt, response, secret, or tool output content. */
+export interface TaskExecutionObservation {
+	taskId: string;
+	operationId: string;
+	fenceEpoch: number;
+	bindingId: string;
+	kind: TaskExecutionObservationKind;
+	receiptRef?: string;
+	failureKind?: string;
 }
 
 export interface TaskTransition {
@@ -214,6 +257,21 @@ export interface OperationPreparedRecord extends DurableRecordBase {
 	operation: OperationRecord;
 }
 
+export interface TaskExecutionClaimedRecord extends DurableRecordBase {
+	type: "TaskExecutionClaimed";
+	operation: OperationRecord;
+}
+
+export interface TaskExecutionBoundRecord extends DurableRecordBase {
+	type: "TaskExecutionBound";
+	binding: TaskExecutionBinding;
+}
+
+export interface TaskExecutionObservedRecord extends DurableRecordBase {
+	type: "TaskExecutionObserved";
+	observation: TaskExecutionObservation;
+}
+
 export interface ActiveTurnAdmittedRecord extends DurableRecordBase {
 	type: "ActiveTurnAdmitted";
 	inboxKey: string;
@@ -235,6 +293,9 @@ export type TaskRuntimeRecord =
 	| TaskTransitionRecord
 	| AdmissionCommittedRecord
 	| OperationPreparedRecord
+	| TaskExecutionClaimedRecord
+	| TaskExecutionBoundRecord
+	| TaskExecutionObservedRecord
 	| ActiveTurnAdmittedRecord;
 
 export interface DurableTaskRuntimeState {

@@ -9,8 +9,14 @@ import {
 	type StartOperationInput,
 	type StartOperationResult,
 	TaskRuntime,
+	type TaskRuntimeArtifactManifestEntry,
+	type TaskRuntimeCapabilityBinding,
+	type TaskRuntimeExecutionResult,
+	TaskRuntimeHost,
+	type TaskRuntimeKernelBinding,
 	type TaskRuntimePolicy,
 	type TaskRuntimeRecord,
+	type TaskRuntimeRouteBinding,
 	type TaskRuntimeSnapshot,
 } from "../../src/core/task-runtime/index.js";
 
@@ -47,13 +53,109 @@ export class FakeNormalizedAdapter {
 	}
 }
 
+export class FakeTaskRuntimeKernelAdapter {
+	readonly inputs: Array<{ taskId: string; sessionRef: string; artifactRef: string; routeId: string }> = [];
+
+	bind = async (input: {
+		task: { taskId: string; sessionRef: string; artifactRef: string };
+		route: { routeId: string };
+	}): Promise<{
+		kernelId: string;
+		capabilityId: string;
+		permittedOperationClasses: readonly ["pure", "idempotent-external"];
+	}> => {
+		this.inputs.push({
+			taskId: input.task.taskId,
+			sessionRef: input.task.sessionRef,
+			artifactRef: input.task.artifactRef,
+			routeId: input.route.routeId,
+		});
+		return {
+			kernelId: `kernel:${input.task.taskId}`,
+			capabilityId: `capability:${input.task.taskId}`,
+			permittedOperationClasses: ["pure", "idempotent-external"],
+		};
+	};
+}
+
+export class FakeTaskRuntimeProviderAdapter {
+	readonly inputs: Array<{ taskId: string; operationId: string; idempotencyKey: string }> = [];
+
+	invoke = async (input: {
+		binding: TaskRuntimeKernelBinding;
+		operation: { operationId: string; idempotencyKey: string };
+	}) => {
+		this.inputs.push({
+			taskId: input.binding.taskId,
+			operationId: input.operation.operationId,
+			idempotencyKey: input.operation.idempotencyKey,
+		});
+		return { receiptRef: `provider-receipt:${input.operation.operationId}` };
+	};
+
+	get callCount(): number {
+		return this.inputs.length;
+	}
+}
+
+export class FakeTaskRuntimeEffectAdapter {
+	readonly inputs: Array<{ taskId: string; operationId: string; providerReceiptRef: string }> = [];
+
+	execute = async (input: {
+		binding: TaskRuntimeKernelBinding;
+		operation: { operationId: string };
+		providerReceipt: { receiptRef: string };
+	}) => {
+		this.inputs.push({
+			taskId: input.binding.taskId,
+			operationId: input.operation.operationId,
+			providerReceiptRef: input.providerReceipt.receiptRef,
+		});
+		return { receiptRef: `effect-receipt:${input.operation.operationId}` };
+	};
+
+	get callCount(): number {
+		return this.inputs.length;
+	}
+}
+
+export class FakeTaskRuntimeDeliveryAdapter {
+	readonly inputs: Array<{ taskId: string; operationId: string; effectReceiptRef: string }> = [];
+
+	deliver = async (input: {
+		binding: TaskRuntimeKernelBinding;
+		operation: { operationId: string };
+		effectReceipt: { receiptRef: string };
+	}) => {
+		this.inputs.push({
+			taskId: input.binding.taskId,
+			operationId: input.operation.operationId,
+			effectReceiptRef: input.effectReceipt.receiptRef,
+		});
+		return { receiptRef: `delivery-receipt:${input.operation.operationId}` };
+	};
+
+	get callCount(): number {
+		return this.inputs.length;
+	}
+}
+
 export interface TaskRuntimeHarness {
 	clock: ControlledClock;
 	transport: FakeNormalizedAdapter;
+	kernel: FakeTaskRuntimeKernelAdapter;
+	provider: FakeTaskRuntimeProviderAdapter;
+	effect: FakeTaskRuntimeEffectAdapter;
+	delivery: FakeTaskRuntimeDeliveryAdapter;
 	startOperation(input: StartOperationInput): Promise<StartOperationResult>;
+	startAndExecute(input: StartOperationInput): Promise<TaskRuntimeExecutionResult>;
 	activeTurnExpectation(taskId: string): Promise<ActiveTurnExpectation>;
 	snapshot(): Promise<TaskRuntimeSnapshot>;
 	records(): Promise<readonly TaskRuntimeRecord[]>;
+	kernelBindings(): readonly TaskRuntimeKernelBinding[];
+	capabilityBindings(): readonly TaskRuntimeCapabilityBinding[];
+	artifactManifest(): readonly TaskRuntimeArtifactManifestEntry[];
+	routeBindings(): readonly TaskRuntimeRouteBinding[];
 	cleanup(): Promise<void>;
 }
 
@@ -81,13 +183,29 @@ export async function createTaskRuntimeHarness(
 			isAdmissionAuthorized: (event) => authorizedActors.has(event.actorRef),
 		},
 	});
+	const kernel = new FakeTaskRuntimeKernelAdapter();
+	const provider = new FakeTaskRuntimeProviderAdapter();
+	const effect = new FakeTaskRuntimeEffectAdapter();
+	const delivery = new FakeTaskRuntimeDeliveryAdapter();
+	const host = new TaskRuntimeHost({
+		runtime,
+		adapters: { kernel, provider, effect, delivery },
+		bindingIdGenerator: ids.next.bind(ids, "record"),
+	});
 	const transport = new FakeNormalizedAdapter(() => runtime);
 
 	return {
 		clock,
 		transport,
+		kernel,
+		provider,
+		effect,
+		delivery,
 		startOperation(input) {
 			return runtime.startOperation(input);
+		},
+		startAndExecute(input) {
+			return host.startAndExecute(input);
 		},
 		activeTurnExpectation(taskId) {
 			return runtime.activeTurnExpectation(taskId);
@@ -97,6 +215,18 @@ export async function createTaskRuntimeHarness(
 		},
 		async records() {
 			return (await runtime.snapshot()).records;
+		},
+		kernelBindings() {
+			return host.kernelBindings();
+		},
+		capabilityBindings() {
+			return host.capabilityBindings();
+		},
+		artifactManifest() {
+			return host.artifactManifest();
+		},
+		routeBindings() {
+			return host.routeBindings();
 		},
 		cleanup() {
 			return rm(tempDir, { recursive: true, force: true });
