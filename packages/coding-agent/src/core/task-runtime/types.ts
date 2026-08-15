@@ -257,6 +257,8 @@ export interface TaskRuntimeSnapshot {
 }
 
 export interface ActiveTurnExpectation {
+	taskId: string;
+	routeId: string;
 	transitionSeq: number;
 	fenceEpoch: number;
 }
