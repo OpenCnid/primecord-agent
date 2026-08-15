@@ -76,30 +76,33 @@ export class TaskRuntime {
 	private readonly store: TaskRuntimeStore;
 
 	async admit(event: NormalizedInboundEvent, expectation?: ActiveTurnExpectation): Promise<AdmissionResult> {
-		assertNormalizedInboundEvent(event);
+		const normalizedEvent = structuredClone(event);
+		const normalizedExpectation = expectation && structuredClone(expectation);
+		assertNormalizedInboundEvent(normalizedEvent);
 		return this.store.transaction(async (state) => {
 			const now = this.clock.now();
-			const inboxKey = createInboxKey(event);
+			const inboxKey = createInboxKey(normalizedEvent);
 			const existing = state.inbox[inboxKey];
 			if (existing) {
-				if (existing.event.payloadDigest === event.payloadDigest) return structuredClone(existing.decision);
+				if (existing.event.payloadDigest === normalizedEvent.payloadDigest)
+					return structuredClone(existing.decision);
 				const conflict: InboxConflict = {
 					kind: "InboxConflict",
-					inboundEventId: event.inboundEventId,
-					requestId: event.requestId,
+					inboundEventId: normalizedEvent.inboundEventId,
+					requestId: normalizedEvent.requestId,
 					inboxKey,
 					expectedPayloadDigest: existing.event.payloadDigest,
-					actualPayloadDigest: event.payloadDigest,
+					actualPayloadDigest: normalizedEvent.payloadDigest,
 					recordedAt: now,
 				};
 				this.append(state, { type: "InboxConflictRejected", conflict }, now);
 				return conflict;
 			}
 
-			const immutableEvent = structuredClone(event);
+			const immutableEvent = structuredClone(normalizedEvent);
 			this.append(state, { type: "InboxReceived", inboxKey, event: immutableEvent }, now);
-
-			if (!(await this.policy.isAdmissionAuthorized(immutableEvent))) {
+			const authorized = await this.policy.isAdmissionAuthorized(structuredClone(immutableEvent));
+			if (!authorized) {
 				return this.commitRejection(state, inboxKey, immutableEvent, "unauthorized_actor", now);
 			}
 
@@ -107,7 +110,7 @@ export class TaskRuntime {
 				return this.commitAdmission(state, inboxKey, immutableEvent, now);
 			}
 			if (immutableEvent.requestedControl === "turn") {
-				return this.commitActiveTurn(state, inboxKey, immutableEvent, expectation, now);
+				return this.commitActiveTurn(state, inboxKey, immutableEvent, normalizedExpectation, now);
 			}
 			return this.commitRejection(state, inboxKey, immutableEvent, "unsupported_control", now);
 		});
@@ -121,6 +124,8 @@ export class TaskRuntime {
 			const task = state.tasks[input.taskId];
 			const lease = state.leases[input.taskId];
 			if (!task || !lease) throw new Error(`Unknown task: ${input.taskId}`);
+			if (lease.workerId !== this.workerId)
+				throw new Error(`Worker ${this.workerId} does not own the lease for ${input.taskId}`);
 			if (task.state !== "Ready") throw new Error(`Task ${input.taskId} is not ready to start work`);
 			if (task.transitionSeq !== input.expectedTransitionSeq || lease.fenceEpoch !== input.expectedFenceEpoch) {
 				throw new Error(`Task ${input.taskId} start rejected by transition or fence compare-and-set`);
@@ -171,7 +176,19 @@ export class TaskRuntime {
 		const task = snapshot.tasks[taskId];
 		const lease = snapshot.leases[taskId];
 		if (!task || !lease) throw new Error(`Unknown task: ${taskId}`);
-		return { transitionSeq: task.transitionSeq, fenceEpoch: lease.fenceEpoch };
+		if (lease.workerId !== this.workerId)
+			throw new Error(`Worker ${this.workerId} does not own the lease for ${taskId}`);
+		if (task.state !== "Active") throw new Error(`Task ${taskId} is not active`);
+		const routes = Object.values(snapshot.routes).filter(
+			(route) => route.taskId === taskId && route.state === "active",
+		);
+		if (routes.length !== 1) throw new Error(`Task ${taskId} requires exactly one active route`);
+		return {
+			taskId,
+			routeId: routes[0].routeId,
+			transitionSeq: task.transitionSeq,
+			fenceEpoch: lease.fenceEpoch,
+		};
 	}
 
 	async takeOverLease(taskId: string, expectedFenceEpoch: number): Promise<TaskLease> {
@@ -205,11 +222,12 @@ export class TaskRuntime {
 		expectation: ActiveTurnExpectation | undefined,
 		now: number,
 	): Promise<AdmissionResult> {
-		const route = this.findRoute(state, event);
-		if (!route) {
+		if (!expectation) {
 			if (this.policy.noActiveRoute === "new_admission") return this.commitAdmission(state, inboxKey, event, now);
-			return this.commitRejection(state, inboxKey, event, "no_active_route", now);
+			return this.commitRejection(state, inboxKey, event, "active_turn_compare_and_set_failed", now);
 		}
+		const route = this.findRoute(state, event, expectation);
+		if (!route) return this.commitRejection(state, inboxKey, event, "active_turn_compare_and_set_failed", now);
 		if (route.idleExpiresAt <= now || route.absoluteExpiresAt <= now) {
 			const expiredRoute: TaskRoute = { ...route, state: "expired" };
 			state.routes[route.routeId] = expiredRoute;
@@ -222,8 +240,10 @@ export class TaskRuntime {
 		if (!task || !lease || task.state !== "Active") {
 			return this.commitRejection(state, inboxKey, event, "no_active_route", now);
 		}
-		const expected = expectation ?? { transitionSeq: task.transitionSeq, fenceEpoch: lease.fenceEpoch };
-		if (expected.transitionSeq !== task.transitionSeq || expected.fenceEpoch !== lease.fenceEpoch) {
+		if (lease.workerId !== this.workerId) {
+			return this.commitRejection(state, inboxKey, event, "active_turn_compare_and_set_failed", now);
+		}
+		if (expectation.transitionSeq !== task.transitionSeq || expectation.fenceEpoch !== lease.fenceEpoch) {
 			return this.commitRejection(state, inboxKey, event, "active_turn_compare_and_set_failed", now);
 		}
 
@@ -280,8 +300,8 @@ export class TaskRuntime {
 				type: "ActiveTurnAdmitted",
 				inboxKey,
 				decision,
-				expectedTransitionSeq: expected.transitionSeq,
-				expectedFenceEpoch: expected.fenceEpoch,
+				expectedTransitionSeq: expectation.transitionSeq,
+				expectedFenceEpoch: expectation.fenceEpoch,
 			},
 			now,
 		);
@@ -416,15 +436,15 @@ export class TaskRuntime {
 		return structuredClone(decision);
 	}
 
-	private findRoute(state: DurableTaskRuntimeState, event: NormalizedInboundEvent): TaskRoute | undefined {
-		const correlationDigest = digest(event.correlationRef);
-		return Object.values(state.routes).find(
-			(route) =>
-				route.state === "active" &&
-				route.transport === event.transport &&
-				route.actorRef === event.actorRef &&
-				route.correlationDigest === correlationDigest,
-		);
+	private findRoute(
+		state: DurableTaskRuntimeState,
+		event: NormalizedInboundEvent,
+		expectation: ActiveTurnExpectation,
+	): TaskRoute | undefined {
+		const route = state.routes[expectation.routeId];
+		if (!route || route.taskId !== expectation.taskId || route.state !== "active") return undefined;
+		if (route.transport !== event.transport || route.actorRef !== event.actorRef) return undefined;
+		return route.correlationDigest === digest(event.correlationRef) ? route : undefined;
 	}
 
 	private createOperation(

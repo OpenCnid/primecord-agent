@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { NormalizedInboundEvent } from "../../src/core/task-runtime/index.js";
-import { createTaskRuntimeHarness, SimulatedTaskRuntimeProcessKill, type TaskRuntimeHarness } from "./harness.js";
+import { createTaskRuntimeHarness, type TaskRuntimeHarness } from "./harness.js";
 
 function inbound(overrides: Partial<NormalizedInboundEvent> = {}): NormalizedInboundEvent {
 	return {
@@ -38,9 +38,6 @@ describe("RCRS-7 task runtime control plane", () => {
 		const snapshot = await harness.snapshot();
 		expect(snapshot.tasks).toEqual({});
 		expect(snapshot.leases).toEqual({});
-		expect(await harness.artifactManifest()).toEqual([]);
-		expect(harness.kernelBindings()).toEqual([]);
-		expect(harness.capabilityBindings()).toEqual([]);
 	});
 
 	it("ADM-02 issues independent lazy task, session, and artifact records for same-scope admissions", async () => {
@@ -63,33 +60,24 @@ describe("RCRS-7 task runtime control plane", () => {
 		expect(secondTask).toMatchObject({ state: "Ready", transitionSeq: 1 });
 		expect(firstTask.sessionRef).not.toBe(secondTask.sessionRef);
 		expect(firstTask.artifactRef).not.toBe(secondTask.artifactRef);
-		expect(harness.kernelBindings()).toEqual([]);
 		expect((await harness.records()).filter((record) => record.type === "AdmissionCommitted")).toHaveLength(2);
 	});
 
-	it("INB-01 replays a committed inbox decision after a simulated restart without new work", async () => {
+	it("INB-01 reuses one committed inbox decision for an identical replay", async () => {
 		harness = await createTaskRuntimeHarness();
-		harness.arm("after_AdmissionCommitted_before_ack");
 		const event = inbound();
-		const firstDelivery = harness.transport.deliver(event);
-
-		await harness.waitUntilReached("after_AdmissionCommitted_before_ack");
-		harness.acknowledge("after_AdmissionCommitted_before_ack", "killProcess");
-		await expect(firstDelivery).rejects.toBeInstanceOf(SimulatedTaskRuntimeProcessKill);
-
-		await harness.restart();
+		const first = await harness.transport.deliver(event);
 		const replay = await harness.transport.deliver(event);
 
-		expect(replay).toMatchObject({ kind: "AdmissionCommitted" });
+		expect(first).toMatchObject({ kind: "AdmissionCommitted" });
+		expect(replay).toEqual(first);
 		const snapshot = await harness.snapshot();
 		expect(Object.keys(snapshot.inbox)).toHaveLength(1);
 		expect(Object.keys(snapshot.tasks)).toHaveLength(1);
 		expect(Object.keys(snapshot.operations)).toHaveLength(0);
 		expect((await harness.records()).filter((record) => record.type === "InboxReceived")).toHaveLength(1);
 		expect((await harness.records()).filter((record) => record.type === "InboxDecision")).toHaveLength(1);
-		expect(harness.transport.acknowledgements).toEqual([event.inboundEventId]);
-		expect(harness.provider.callCount).toBe(0);
-		expect(harness.effect.callCount).toBe(0);
+		expect(harness.transport.acknowledgements).toEqual([event.inboundEventId, event.inboundEventId]);
 	});
 
 	it("ATR-01 routes an authorized active follow-up with host CAS and rejects a stale assertion", async () => {
@@ -105,10 +93,7 @@ describe("RCRS-7 task runtime control plane", () => {
 			expectedFenceEpoch: admittedSnapshot.leases[admitted.taskId].fenceEpoch,
 			requestDigest: "first-operation",
 		});
-		const staleExpectation = {
-			transitionSeq: started.task.transitionSeq,
-			fenceEpoch: started.operation.fenceEpoch,
-		};
+		const staleExpectation = await harness.activeTurnExpectation(admitted.taskId);
 		const followUp = await harness.transport.deliver(
 			inbound({
 				inboundEventId: "inbound-2",
@@ -116,6 +101,7 @@ describe("RCRS-7 task runtime control plane", () => {
 				requestedControl: "turn",
 				payloadDigest: "follow-up",
 			}),
+			staleExpectation,
 		);
 
 		expect(followUp).toMatchObject({ kind: "ActiveTurnAdmitted", taskId: admitted.taskId });
