@@ -157,6 +157,7 @@ import {
 	type DaemonExtensionUiExecutionOwner,
 	withDaemonExtensionUiExecutionOwner,
 } from "./daemon-extension-ui-owner.js";
+import { isHostOwnedDaemon } from "./daemon-host-ownership.js";
 import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
@@ -681,6 +682,13 @@ export class AgentDaemon {
 		if (await this.canConnectToSupervisor(supervisorSocketPath)) {
 			return;
 		}
+		if (isHostOwnedDaemon()) {
+			this.log(
+				"host-owned supervisor is unavailable; waiting for its service manager instead of spawning a replacement",
+			);
+			this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
+			return;
+		}
 		await this.launchReplacementSupervisor(supervisorSocketPath);
 		if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
 			this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
@@ -771,6 +779,10 @@ export class AgentDaemon {
 	}
 
 	private async launchReplacementSupervisor(supervisorSocketPath: string): Promise<void> {
+		if (isHostOwnedDaemon()) {
+			this.log("refusing to spawn a replacement for a host-owned supervisor");
+			return;
+		}
 		if (this.supervisorLaunchInProgress || this.shuttingDown) {
 			return;
 		}

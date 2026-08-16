@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { getAgentDir } from "../../config.js";
 
 export type DiscordBotMessageMode = "none" | "mentions" | "all";
+export type DiscordRuntimeOwner = "gateway" | "host";
 
 export interface DiscordBridgeConfig {
 	botToken: string;
@@ -39,6 +40,8 @@ export interface DiscordBridgeConfig {
 	gatewayHealthFailureThreshold: number;
 	/** Maximum accepted Gateway heartbeat round-trip time; 0 disables the latency threshold. */
 	gatewayMaxPingMs: number;
+	/** Select whether the gateway launches the daemon or attaches to a host-owned runtime. */
+	runtimeOwner: DiscordRuntimeOwner;
 	registerCommands: boolean;
 	toolProgress: boolean;
 	extensionUiTimeoutMs: number;
@@ -54,6 +57,7 @@ export type RedactedDiscordBridgeConfig = Omit<DiscordBridgeConfig, "botToken"> 
 export type DiscordEnvironment = Readonly<Record<string, string | undefined>>;
 
 const BOT_MESSAGE_MODES = ["none", "mentions", "all"] as const;
+const RUNTIME_OWNERS = ["gateway", "host"] as const;
 const REDACTED_TOKEN = "[REDACTED]" as const;
 export const DEFAULT_DISCORD_READ_MAX_MESSAGES = 50;
 export const DEFAULT_DISCORD_READ_MAX_CONTENT_CHARS = 4_000;
@@ -238,6 +242,7 @@ export function loadDiscordConfig(env: DiscordEnvironment = process.env): Discor
 			DEFAULT_DISCORD_GATEWAY_MAX_PING_MS,
 			MAX_DISCORD_GATEWAY_MAX_PING_MS,
 		),
+		runtimeOwner: readEnum(env, "PRIME_DISCORD_RUNTIME_OWNER", RUNTIME_OWNERS, "gateway"),
 		registerCommands: readBoolean(env, "PRIME_DISCORD_REGISTER_COMMANDS", true),
 		toolProgress: readBoolean(env, "PRIME_DISCORD_TOOL_PROGRESS", true),
 		extensionUiTimeoutMs: readPositiveInteger(env, "PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS", 300_000),

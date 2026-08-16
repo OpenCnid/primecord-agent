@@ -61,7 +61,7 @@ async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promis
 	}
 }
 
-type DaemonVersionProbe =
+export type DaemonVersionProbe =
 	| { status: "absent" }
 	| { status: "current"; hello: DaemonHello }
 	| { status: "stale"; hello?: DaemonHello };

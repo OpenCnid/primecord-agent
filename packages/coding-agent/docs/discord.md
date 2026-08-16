@@ -76,6 +76,7 @@ Lists are comma-separated Discord IDs.
 | `PRIME_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS` | `30000` | Periodic Discord Gateway WebSocket health sample; `0` disables the watchdog. |
 | `PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD` | `3` | Consecutive unhealthy WebSocket samples before a clean supervised restart. |
 | `PRIME_DISCORD_GATEWAY_MAX_PING_MS` | `30000` | Maximum accepted Discord Gateway heartbeat latency; `0` disables only the latency threshold. |
+| `PRIME_DISCORD_RUNTIME_OWNER` | `gateway` | `gateway` preserves legacy daemon launch; `host` attaches only to an externally supervised daemon and fails closed if its current-version hello is unavailable. |
 | `PRIME_DISCORD_REGISTER_COMMANDS` | `true` | Register the gateway's global slash commands at startup. |
 | `PRIME_DISCORD_TOOL_PROGRESS` | `true` | Show general tool-progress updates while work is in progress. IPython calls are described only as workspace steps; arguments and reasoning remain hidden. |
 | `PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS` | `300000` | Maximum time to wait for a Discord response to an extension dialog. |
@@ -95,6 +96,49 @@ When configured, the guild allowlist is checked before channel and identity poli
 - `/new` replaces only the current Discord session mapping. `/abort` aborts that session and clears its queued Discord messages.
 
 Use `prime-agent shutdown` only when you intend to stop the resident Prime workers too.
+
+## Host-owned runtime service (systemd user)
+
+For a supervised Discord deployment, run the daemon in its **own** user-service cgroup and make the gateway attach-only. This keeps resident workers and their kernels alive when the Discord Gateway process is replaced. Do not run two daemons on the same socket.
+
+1. Deploy a version containing this mode, then wait for existing work to finish and stop the old gateway-owned service.
+2. Enable and start a daemon service such as:
+
+```ini
+# ~/.config/systemd/user/prime-agent-daemon.service
+[Unit]
+Description=Prime Agent resident daemon and workers
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/prime-workspace
+Environment=PRIME_AGENT_HOST_OWNED_DAEMON=1
+ExecStart=/opt/prime-agent/prime-agent.sh --mode daemon --cwd /srv/prime-workspace --daemon-socket %h/.prime/agent/discord/daemon.sock
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=120
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+3. Update the existing gateway service to want (not bind to) that service and use attach-only mode:
+
+```ini
+[Unit]
+Wants=prime-agent-daemon.service
+After=prime-agent-daemon.service
+
+[Service]
+ExecStart=/opt/prime-agent/prime-agent.sh gateway discord --daemon-owner external --cwd /srv/prime-workspace --daemon-socket %h/.prime/agent/discord/daemon.sock
+```
+
+`--daemon-owner external` is equivalent to `PRIME_DISCORD_RUNTIME_OWNER=host`; `managed` is the legacy launcher mode. Before Discord logs in, external mode probes the socket, waits for a daemon hello, and requires the current protocol/schema/app version. A missing or stale service fails the gateway start and lets its normal supervisor retry; it never launches, replaces, or shuts down the daemon. The same attach-only probe is used during the 24-hour runtime reconnect window.
+
+The daemon unit must not read the Discord bot-token environment file. Keep runtime credentials in a separate owner-only file if needed. `PRIME_AGENT_HOST_OWNED_DAEMON=1` also prevents a worker or self-update handoff from detached-spawning another supervisor; an update exits with a nonzero status so systemd starts the replacement in the same daemon cgroup. Roll back only with no active work: stop gateway, stop daemon, verify the socket owner is gone, then restore the managed gateway service.
 
 ## Permission-scoped Discord reads
 

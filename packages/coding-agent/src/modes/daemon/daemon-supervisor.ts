@@ -54,6 +54,7 @@ import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-r
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
+import { HOST_OWNED_DAEMON_RESTART_EXIT_CODE, isHostOwnedDaemon } from "./daemon-host-ownership.js";
 import {
 	collectDaemonClientEnv,
 	createDaemonEventMeta,
@@ -5253,6 +5254,10 @@ export class DaemonSupervisor {
 		const ownership = this.ownership;
 		this.ownership = undefined;
 		await this.runCleanupStep("daemon ownership", async () => ownership?.release());
+		if (relaunch && isHostOwnedDaemon()) {
+			this.log("host-owned daemon relaunch requested; exiting for the service manager to restart it");
+			process.exit(HOST_OWNED_DAEMON_RESTART_EXIT_CODE);
+		}
 		if (relaunch) {
 			const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", this.socketPath]);
 			const environment = createCliSubprocessEnv();

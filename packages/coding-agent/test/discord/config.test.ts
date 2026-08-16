@@ -47,6 +47,7 @@ describe("loadDiscordConfig", () => {
 			gatewayHealthCheckIntervalMs: 30_000,
 			gatewayHealthFailureThreshold: 3,
 			gatewayMaxPingMs: 30_000,
+			runtimeOwner: "gateway",
 			registerCommands: true,
 			toolProgress: true,
 			extensionUiTimeoutMs: 300_000,
@@ -90,6 +91,7 @@ describe("loadDiscordConfig", () => {
 			PRIME_DISCORD_GATEWAY_HEALTH_CHECK_INTERVAL_MS: "60000",
 			PRIME_DISCORD_GATEWAY_HEALTH_FAILURE_THRESHOLD: "4",
 			PRIME_DISCORD_GATEWAY_MAX_PING_MS: "2000",
+			PRIME_DISCORD_RUNTIME_OWNER: "host",
 			PRIME_DISCORD_REGISTER_COMMANDS: "false",
 			PRIME_DISCORD_TOOL_PROGRESS: "false",
 			PRIME_DISCORD_EXTENSION_UI_TIMEOUT_MS: "4321",
@@ -131,6 +133,7 @@ describe("loadDiscordConfig", () => {
 			gatewayHealthCheckIntervalMs: 60_000,
 			gatewayHealthFailureThreshold: 4,
 			gatewayMaxPingMs: 2_000,
+			runtimeOwner: "host",
 			registerCommands: false,
 			toolProgress: false,
 			extensionUiTimeoutMs: 4_321,
@@ -177,6 +180,9 @@ describe("loadDiscordConfig", () => {
 		);
 		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_ALLOW_BOTS: "trusted" })).toThrow(
 			"PRIME_DISCORD_ALLOW_BOTS must be one of: none, mentions, all",
+		);
+		expect(() => loadDiscordConfig({ ...token, PRIME_DISCORD_RUNTIME_OWNER: "child" })).toThrow(
+			"PRIME_DISCORD_RUNTIME_OWNER must be one of: gateway, host",
 		);
 	});
 

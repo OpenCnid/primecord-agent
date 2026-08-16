@@ -30,7 +30,11 @@ import type {
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
 } from "../../modes/agent-connection/types.js";
-import { type DiscordAgentConnectionFactory, DiscordAgentRegistry } from "./agent-registry.js";
+import {
+	type DiscordAgentConnectionFactory,
+	DiscordAgentRegistry,
+	type DiscordAgentRegistryOptions,
+} from "./agent-registry.js";
 import {
 	type DiscordAttachmentDescriptor,
 	type ProcessedDiscordAttachments,
@@ -85,6 +89,8 @@ export interface DiscordBridgeOptions {
 	socketPath: string;
 	client?: Client;
 	connectionFactory?: DiscordAgentConnectionFactory;
+	/** Internal seam for the external daemon hello/version readiness probe. */
+	runtimeProbe?: DiscordAgentRegistryOptions["probeDaemonVersion"];
 	shutdownTimeoutMs?: number;
 	logger?: Pick<Console, "info" | "warn" | "error">;
 }
@@ -321,12 +327,14 @@ export class DiscordBridge {
 			agentDir: options.agentDir,
 			sessionRoot: config.sessionDir,
 			socketPath: options.socketPath,
+			runtimeOwner: config.runtimeOwner,
 			runtimeConfig: {
 				discordGatewayRead: true,
 				discordGatewayThreadCreation: true,
 				appendSystemPrompt: [DISCORD_WORKER_SYSTEM_SCAFFOLD],
 			},
 			connectionFactory: options.connectionFactory,
+			probeDaemonVersion: options.runtimeProbe,
 			eventListener: this.onRegistryConnectionEvent,
 		});
 	}
@@ -345,6 +353,9 @@ export class DiscordBridge {
 	}
 
 	private async startInternal(): Promise<string> {
+		if (this.config.runtimeOwner === "host") {
+			await this.registry.ensureRuntimeReady();
+		}
 		this.client.on("messageCreate", this.onMessage);
 		this.client.on("interactionCreate", this.onInteraction);
 		this.client.on("error", this.onClientError);
@@ -440,11 +451,10 @@ export class DiscordBridge {
 		);
 		if (this.gatewayHealthFailures < this.config.gatewayHealthFailureThreshold) return;
 
-		// A current receipt can still deliver via Discord's REST API even when the
-		// Gateway WebSocket is unhealthy. Do not turn that unrelated health problem
-		// into a user-visible aborted task; stop admitting new work and drain the
-		// existing receipt before supervisor replacement.
-		if (this.activeTurns.size > 0) {
+		// Legacy gateway-owned runtimes share this process boundary, so preserve the
+		// existing receipt while it drains. A host-owned runtime is independent of the
+		// adapter and must let the bounded watchdog replace this gateway immediately.
+		if (this.config.runtimeOwner === "gateway" && this.activeTurns.size > 0) {
 			this.deferredGatewayHealthFailure ??= reason;
 			this.stopGatewayHealthMonitor();
 			this.logger.warn("Deferring Discord Gateway restart until active Discord work reaches a terminal result.");
@@ -1560,11 +1570,16 @@ export class DiscordBridge {
 			this.client.off("shardReady", this.onShardReady);
 			const drain = this.dispatchQueue.stopAcceptingAndDrain();
 			const drained = await settlesBefore(drain, this.shutdownTimeoutMs);
-			if (!drained) {
+			if (!drained && this.config.runtimeOwner === "gateway") {
 				await this.registry.abortAll();
 				await settlesBefore(drain, Math.min(5_000, this.shutdownTimeoutMs));
 			}
-			if (this.pendingExtensionDialogs.size > 0) await this.registry.abortAll();
+			if (!drained && this.config.runtimeOwner === "host") {
+				this.logger.warn("Discord gateway stop timed out; detaching host-owned runtime work without aborting it.");
+			}
+			if (this.pendingExtensionDialogs.size > 0 && this.config.runtimeOwner === "gateway") {
+				await this.registry.abortAll();
+			}
 			await Promise.allSettled(
 				[...this.pendingExtensionDialogs.keys()].map((key) => this.discardPendingExtensionDialogForKey(key)),
 			);

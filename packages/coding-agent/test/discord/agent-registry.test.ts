@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type DiscordAgentConnectionFactory, DiscordAgentRegistry } from "../../src/gateway/discord/agent-registry.js";
+import {
+	type DiscordAgentConnectionFactory,
+	DiscordAgentRegistry,
+	type DiscordAgentRegistryOptions,
+} from "../../src/gateway/discord/agent-registry.js";
 import type {
 	AgentConnection,
 	AgentConnectionEvent,
@@ -115,13 +119,19 @@ function createState(activeSessionId: string, sessionFile: string): AgentConnect
 	};
 }
 
-function createRegistry(root: string, connectionFactory: DiscordAgentConnectionFactory): DiscordAgentRegistry {
+function createRegistry(
+	root: string,
+	connectionFactory: DiscordAgentConnectionFactory,
+	overrides: Partial<DiscordAgentRegistryOptions> = {},
+): DiscordAgentRegistry {
 	return new DiscordAgentRegistry({
 		cwd: root,
 		agentDir: join(root, "agent"),
 		sessionRoot: join(root, "sessions"),
 		socketPath: join(root, "daemon.sock"),
 		statePath: join(root, "discord-sessions.json"),
+		runtimeOwner: "host",
+		...overrides,
 		connectionFactory,
 	});
 }
@@ -136,6 +146,43 @@ async function withTemporaryDirectory(run: (root: string) => Promise<void>): Pro
 }
 
 describe("DiscordAgentRegistry", () => {
+	it("uses attach-only readiness for the host-owned daemon", async () => {
+		await withTemporaryDirectory(async (root) => {
+			const connection = new FakeAgentConnection(createState("active-1", join(root, "session-1.jsonl")));
+			let launchCalls = 0;
+			const registry = createRegistry(root, async () => connection.asAgentConnection(), {
+				runtimeOwner: "host",
+				ensureDaemonRunning: async () => {
+					launchCalls++;
+				},
+				probeDaemonVersion: async () => ({ status: "current", hello: {} as never }),
+			});
+			await registry.ensureRuntimeReady();
+			expect(launchCalls).toBe(0);
+			await registry.dispose();
+		});
+	});
+
+	it("fails closed rather than launching an unavailable host-owned daemon", async () => {
+		await withTemporaryDirectory(async (root) => {
+			let launchCalls = 0;
+			const registry = createRegistry(
+				root,
+				async () => new FakeAgentConnection(createState("active-1", "session")).asAgentConnection(),
+				{
+					runtimeOwner: "host",
+					ensureDaemonRunning: async () => {
+						launchCalls++;
+					},
+					probeDaemonVersion: async () => ({ status: "absent" }),
+				},
+			);
+			await expect(registry.ensureRuntimeReady()).rejects.toThrow("Host-owned Prime Agent daemon is unavailable");
+			expect(launchCalls).toBe(0);
+			await registry.dispose();
+		});
+	});
+
 	it("uses a single in-flight connection creation for concurrent requests", async () => {
 		await withTemporaryDirectory(async (root) => {
 			const connection = new FakeAgentConnection(createState("active-1", join(root, "session-1.jsonl")));

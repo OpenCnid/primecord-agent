@@ -7,6 +7,8 @@ import { type DiscordEnvironment, loadDiscordConfig } from "./config.js";
 interface DiscordGatewayCliOptions {
 	cwd?: string;
 	daemonSocket?: string;
+	/** managed is legacy gateway launch; external attaches to the host-owned service. */
+	daemonOwner?: "managed" | "external";
 }
 
 export async function runDiscordGatewayCommand(args: readonly string[]): Promise<void> {
@@ -15,6 +17,12 @@ export async function runDiscordGatewayCommand(args: readonly string[]): Promise
 		...process.env,
 		PRIME_DISCORD_BOT_TOKEN: process.env.PRIME_DISCORD_BOT_TOKEN ?? process.env.DISCORD_BOT_TOKEN,
 		PRIME_DISCORD_CWD: options.cwd ?? process.env.PRIME_DISCORD_CWD,
+		PRIME_DISCORD_RUNTIME_OWNER:
+			options.daemonOwner === "external"
+				? "host"
+				: options.daemonOwner === "managed"
+					? "gateway"
+					: process.env.PRIME_DISCORD_RUNTIME_OWNER,
 	};
 	const config = loadDiscordConfig(environment);
 	delete process.env.PRIME_DISCORD_BOT_TOKEN;
@@ -67,6 +75,14 @@ export function parseDiscordGatewayArgs(args: readonly string[]): DiscordGateway
 			if (!value || value.startsWith("-")) throw new Error(`${argument} requires a value`);
 			if (argument === "--cwd") options.cwd = resolve(value);
 			else options.daemonSocket = resolve(value);
+			continue;
+		}
+		if (argument === "--daemon-owner") {
+			const value = args[++index];
+			if (value !== "managed" && value !== "external") {
+				throw new Error("--daemon-owner must be one of: managed, external");
+			}
+			options.daemonOwner = value;
 			continue;
 		}
 		throw new Error(`Unknown Discord gateway option: ${argument}`);

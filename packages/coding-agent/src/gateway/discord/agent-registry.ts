@@ -5,6 +5,7 @@ import {
 	ensureInteractiveDaemonRunning,
 	isDaemonSessionSummary,
 	listActiveDaemonSessionSummaries,
+	probeDaemonVersion,
 } from "../../cli/daemon-launch.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import { DaemonAgentConnection } from "../../modes/agent-connection/daemon-agent-connection.js";
@@ -12,6 +13,7 @@ import type { AgentConnection, AgentConnectionEvent } from "../../modes/agent-co
 import { DaemonClient } from "../../modes/daemon/daemon-client.js";
 import { collectDaemonClientEnv } from "../../modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../modes/daemon/daemon-session-list.js";
+import type { DiscordRuntimeOwner } from "./config.js";
 
 interface PersistedSessionMapping {
 	activeSessionId?: string;
@@ -30,6 +32,12 @@ export interface DiscordAgentRegistryOptions {
 	socketPath: string;
 	runtimeConfig?: AgentSessionRuntimeConfig;
 	statePath?: string;
+	/** The gateway is a legacy daemon launcher only in gateway-owned mode. */
+	runtimeOwner?: DiscordRuntimeOwner;
+	/** Testable launcher seam; never invoked while the host owns the runtime. */
+	ensureDaemonRunning?: (socketPath: string, cwd: string) => Promise<void>;
+	/** Attach-only current-version probe for the externally owned runtime. */
+	probeDaemonVersion?: typeof probeDaemonVersion;
 	connectionFactory?: DiscordAgentConnectionFactory;
 	eventListener?: (key: string, connection: AgentConnection, event: AgentConnectionEvent) => void | Promise<void>;
 }
@@ -97,6 +105,11 @@ export class DiscordAgentRegistry {
 			await this.refreshMapping(key, connection);
 		}
 		return result;
+	}
+
+	/** Verify that a host-owned daemon is available without ever launching or taking it over. */
+	async ensureRuntimeReady(): Promise<void> {
+		await this.ensureRuntimeAvailable();
 	}
 
 	dispose(): Promise<void> {
@@ -189,8 +202,7 @@ export class DiscordAgentRegistry {
 	}
 
 	private async createDaemonConnection(request: DiscordAgentConnectionRequest): Promise<AgentConnection> {
-		await ensureInteractiveDaemonRunning(this.options.socketPath, this.options.cwd);
-
+		await this.ensureRuntimeAvailable();
 		const mappedConnection = await this.tryMappedConnection(request.mapping);
 		if (mappedConnection) return mappedConnection;
 
@@ -277,8 +289,23 @@ export class DiscordAgentRegistry {
 			supportsDiscordGatewayRead: true,
 			supportsDiscordGatewayThreadCreation: true,
 			reconnectTimeoutMs: DISCORD_DAEMON_RECONNECT_TIMEOUT_MS,
-			recoverDaemon: () => ensureInteractiveDaemonRunning(this.options.socketPath, this.options.cwd),
+			recoverDaemon: () => this.ensureRuntimeAvailable(),
 		});
+	}
+
+	private async ensureRuntimeAvailable(): Promise<void> {
+		if ((this.options.runtimeOwner ?? "gateway") === "host") {
+			const probe = await (this.options.probeDaemonVersion ?? probeDaemonVersion)(this.options.socketPath);
+			if (probe.status === "current") return;
+			const state = probe.status === "stale" ? "incompatible" : "unavailable";
+			throw new Error(
+				`Host-owned Prime Agent daemon is ${state} at ${this.options.socketPath}; the Discord gateway will not launch or replace it.`,
+			);
+		}
+		await (this.options.ensureDaemonRunning ?? ensureInteractiveDaemonRunning)(
+			this.options.socketPath,
+			this.options.cwd,
+		);
 	}
 }
 

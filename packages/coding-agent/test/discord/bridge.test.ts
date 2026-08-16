@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type Client, MessageType, Status } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import type { DiscordAgentConnectionFactory } from "../../src/gateway/discord/agent-registry.js";
-import { DiscordBridge } from "../../src/gateway/discord/bridge.js";
+import { DiscordBridge, type DiscordBridgeOptions } from "../../src/gateway/discord/bridge.js";
 import type { DiscordBridgeConfig } from "../../src/gateway/discord/config.js";
 import type {
 	AgentConnection,
@@ -111,6 +111,7 @@ function config(overrides: Partial<DiscordBridgeConfig> = {}): DiscordBridgeConf
 		gatewayHealthCheckIntervalMs: 0,
 		gatewayHealthFailureThreshold: 3,
 		gatewayMaxPingMs: 30_000,
+		runtimeOwner: "host",
 		registerCommands: false,
 		toolProgress: true,
 		extensionUiTimeoutMs: 300_000,
@@ -125,6 +126,7 @@ function createBridge(
 	client: FakeDiscordClient,
 	overrides: Partial<DiscordBridgeConfig> = {},
 	connectionFactory?: DiscordAgentConnectionFactory,
+	bridgeOverrides: Pick<DiscordBridgeOptions, "shutdownTimeoutMs" | "runtimeProbe"> = {},
 ): DiscordBridge {
 	return new DiscordBridge(config(overrides), {
 		agentDir: join(tmpdir(), "prime-discord-bridge-agent"),
@@ -132,6 +134,8 @@ function createBridge(
 		client: client.asClient(),
 		logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 		...(connectionFactory ? { connectionFactory } : {}),
+		runtimeProbe: async () => ({ status: "current", hello: {} as never }),
+		...bridgeOverrides,
 	});
 }
 
@@ -177,6 +181,8 @@ class FakeBridgeConnection {
 	toolEventDelayMs = 0;
 	lastAssistantText = "resource response";
 	responseFailures = 0;
+	abortCalls = 0;
+	disposeCalls = 0;
 	rejectBusyPrompt: string | undefined;
 
 	constructor(
@@ -235,10 +241,13 @@ class FakeBridgeConnection {
 	}
 
 	async abortAndClearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+		this.abortCalls++;
 		return { steering: [], followUp: [] };
 	}
 
-	async dispose(): Promise<void> {}
+	async dispose(): Promise<void> {
+		this.disposeCalls++;
+	}
 
 	asAgentConnection(): AgentConnection {
 		return this as unknown as AgentConnection;
@@ -367,6 +376,61 @@ describe("DiscordBridge lifecycle", () => {
 		expect(client.listenerCount("interactionCreate")).toBe(0);
 		await expect(bridge.stop()).resolves.toBeUndefined();
 		expect(client.destroyCalls).toBe(1);
+	});
+
+	it("detaches a timed-out active turn instead of aborting host-owned runtime work", async () => {
+		const client = new FakeDiscordClient();
+		const activeWork = deferred<void>();
+		const connection = new FakeBridgeConnection(
+			bridgeState(join(tmpdir(), "prime-discord-detach-on-stop.jsonl")),
+			[],
+		);
+		connection.promptGates.push(activeWork.promise);
+		const channel = {
+			id: "dm-1",
+			isThread: () => false,
+			isSendable: () => true,
+			sendTyping: vi.fn(async () => undefined),
+			send: vi.fn(async () => ({ edit: vi.fn(async () => undefined) })),
+		};
+		const message = {
+			id: "message-1",
+			content: "keep working",
+			webhookId: null,
+			system: false,
+			type: MessageType.Default,
+			channel,
+			channelId: "dm-1",
+			guildId: null,
+			member: null,
+			author: { id: "user-1", bot: false, username: "user" },
+			mentions: { users: { has: () => false, some: () => false } },
+			attachments: { map: () => [], first: () => undefined },
+			inGuild: () => false,
+		};
+		const bridge = createBridge(
+			client,
+			{ reactions: false, runtimeOwner: "host" },
+			async () => connection.asAgentConnection(),
+			{ shutdownTimeoutMs: 1 },
+		);
+		await bridge.start();
+		client.emit("messageCreate", message);
+		await vi.waitFor(() => expect(connection.prompts).toHaveLength(1));
+		await bridge.stop();
+		expect(connection.abortCalls).toBe(0);
+		expect(connection.disposeCalls).toBe(1);
+		activeWork.resolve();
+	});
+
+	it("does not log into Discord when the host-owned daemon fails its readiness probe", async () => {
+		const client = new FakeDiscordClient();
+		const bridge = createBridge(client, { runtimeOwner: "host" }, undefined, {
+			runtimeProbe: async () => ({ status: "absent" }),
+		});
+		await expect(bridge.start()).rejects.toThrow("Host-owned Prime Agent daemon is unavailable");
+		expect(client.loginTokens).toEqual([]);
+		await bridge.stop();
 	});
 
 	it("does not become accepting when stopped during login", async () => {
@@ -780,6 +844,7 @@ describe("DiscordBridge lifecycle", () => {
 				gatewayHealthCheckIntervalMs: 5,
 				gatewayHealthFailureThreshold: 1,
 				gatewayMaxPingMs: 50,
+				runtimeOwner: "gateway",
 			},
 			factory,
 		);

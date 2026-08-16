@@ -20,6 +20,14 @@ describe("parseDiscordGatewayArgs", () => {
 		});
 	});
 
+	it("selects an attach-only external daemon without relying on ambient environment", () => {
+		expect(parseDiscordGatewayArgs(["--daemon-owner", "external"])).toEqual({ daemonOwner: "external" });
+		expect(parseDiscordGatewayArgs(["--daemon-owner", "managed"])).toEqual({ daemonOwner: "managed" });
+		expect(() => parseDiscordGatewayArgs(["--daemon-owner", "child"])).toThrow(
+			"--daemon-owner must be one of: managed, external",
+		);
+	});
+
 	it.each(["--cwd", "--daemon-socket"])("rejects a missing value for %s", (option) => {
 		expect(() => parseDiscordGatewayArgs([option])).toThrow(`${option} requires a value`);
 		expect(() => parseDiscordGatewayArgs([option, ""])).toThrow(`${option} requires a value`);
