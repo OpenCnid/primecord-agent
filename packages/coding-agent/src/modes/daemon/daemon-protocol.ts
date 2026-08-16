@@ -406,6 +406,19 @@ export type DaemonCommand =
 	| { id?: string; type: "rename"; activeSessionId: string; name: string }
 	| {
 			id?: string;
+			type: "submit_discord_turn";
+			activeSessionId: string;
+			turnId: string;
+			requestDigest: string;
+			fence: number;
+			message: string;
+			images?: ImageContent[];
+			source?: InputSource;
+	  }
+	| { id?: string; type: "get_discord_turn"; turnId: string }
+	| { id?: string; type: "cancel_discord_turn"; turnId: string; fence: number }
+	| {
+			id?: string;
 			type: "prompt";
 			activeSessionId: string;
 			message: string;
@@ -704,6 +717,9 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	promote_owned_session: CLIENT_OWNED_DAEMON_COMMAND,
 	kill: LEGACY_DAEMON_COMMAND,
 	rename: LEGACY_DAEMON_COMMAND,
+	submit_discord_turn: LEGACY_DAEMON_COMMAND,
+	get_discord_turn: LEGACY_DAEMON_COMMAND,
+	cancel_discord_turn: LEGACY_DAEMON_COMMAND,
 	prompt: SESSION_INPUT_ADMISSION_COMMAND,
 	cancel_prompt_admission: PROMPT_ADMISSION_CANCELLATION_COMMAND,
 	prompt_and_wait: SESSION_INPUT_ADMISSION_COMMAND,
@@ -1123,6 +1139,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_system_prompt",
 	"get_rlm_max_depth_status",
 	"get_tool_definition",
+	"get_discord_turn",
 ]);
 
 export function isDaemonMutatingCommand(command: Pick<DaemonCommand, "type">): boolean {
